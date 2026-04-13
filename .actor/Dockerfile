@@ -4,8 +4,7 @@ COPY --chown=myuser package*.json ./
 RUN npm install --include=dev --audit=false
 
 COPY --chown=myuser . ./
+RUN rm -f tsconfig.tsbuildinfo
 RUN npm run build
-
-RUN ls -la dist/
 
 CMD ["node", "dist/main.js"]

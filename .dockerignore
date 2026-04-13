@@ -13,3 +13,5 @@ node_modules
 
 # git folder
 .git
+
+tsconfig.tsbuildinfo
