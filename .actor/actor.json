@@ -1,0 +1,10 @@
+{
+    "actorSpecification": 1,
+    "name": "booking-flow-classifier",
+    "title": "Booking Flow Classifier",
+    "version": "1.0",
+    "buildTag": "latest",
+    "environmentVariables": {},
+    "input": "./input_schema.json",
+    "dockerfile": "./Dockerfile"
+}

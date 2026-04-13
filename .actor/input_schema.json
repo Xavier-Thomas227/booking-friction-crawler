@@ -1,0 +1,25 @@
+{
+    "title": "Booking Flow Classifier Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrls": {
+            "title": "URLs to classify",
+            "type": "array",
+            "description": "List of booking page URLs to crawl and classify.",
+            "editor": "requestListSources",
+            "prefill": [
+                { "url": "https://example.com" }
+            ]
+        },
+        "maxRequestsPerCrawl": {
+            "title": "Max requests per crawl",
+            "type": "integer",
+            "description": "Maximum number of pages to process per run.",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 100
+        }
+    },
+    "required": ["startUrls"]
+}
