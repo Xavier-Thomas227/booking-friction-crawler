@@ -820,6 +820,23 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
         scores.unknown = 1 + Math.min(schedulerSignals.size, 5);
     }
 
+    // ─── Known booking vendor correction ───
+    // A recognized booking platform (Square, Vagaro, Zenoti, etc.) is
+    // almost never a plain contact form.  When the surface lives on a
+    // known vendor host, suppress the contact_form score and give a
+    // small boost to scheduler states so that even weak scheduler
+    // signals outrank a false-positive contact_form classification.
+    const surfaceHost = getHostname(surface.url);
+    if (isKnownVendorHost(surfaceHost)) {
+        scores.contact_form -= 4;
+
+        if (schedulerSignals.size > 0) {
+            scores.service_list += 2;
+            scores.time_picker += 2;
+            scores.date_picker += 2;
+        }
+    }
+
     // Pick the highest-scoring state
     let state: BookingState = 'landing';
     let score = 0;
