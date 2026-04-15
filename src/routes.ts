@@ -255,12 +255,6 @@ function vendorRequiresAccountForOnlineBooking({
 
 /* ══════════════════════════════════════════════════════════════
  *  NEW — Fallback vendor detection from visited / iframe URLs
- *
- *  `detectVendor(page)` inspects the DOM of the active frame.
- *  When it misses, we can still identify the vendor from URLs
- *  the crawler has accumulated — iframe srcs, redirect chains,
- *  etc.  This provides a second-chance vendor signal used for
- *  the gated-vendor early exit and the `bookingVendor` label.
  * ══════════════════════════════════════════════════════════════ */
 
 const VENDOR_URL_DETECTION_PATTERNS: { pattern: RegExp; name: string }[] = [
@@ -310,10 +304,6 @@ function resolveVendor(
 
 /* ══════════════════════════════════════════════════════════════
  *  NEW — Known vendor login-gate URL patterns
- *
- *  Some vendor webstore URLs are *always* behind a login wall.
- *  Detecting these in visited/iframe URLs gives high-confidence
- *  forced-account-creation evidence independent of DOM analysis.
  * ══════════════════════════════════════════════════════════════ */
 
 const VENDOR_LOGIN_GATE_URL_PATTERNS: RegExp[] = [
@@ -422,15 +412,6 @@ function isAmbientPlatformAuth(
 
 /* ══════════════════════════════════════════════════════════════
  *  Visited-URL live-scheduler evidence
- *
- *  CHANGED: added GoHighLevel/LeadConnector booking calendar
- *  (/widget/booking/) and Zenoti webstore patterns.
- *
- *  The Zenoti webstore IS a live scheduler (services, dates,
- *  times) — it just happens to be behind a login wall.
- *  Including it here lets the `strongSchedulerEvidence &&
- *  vendorRequiresAccount` branch fire correctly when the
- *  early exit was somehow bypassed.
  * ══════════════════════════════════════════════════════════════ */
 
 const LIVE_SCHEDULER_URL_PATTERNS: RegExp[] = [
@@ -462,7 +443,7 @@ const LIVE_SCHEDULER_URL_PATTERNS: RegExp[] = [
     /* Phorest */
     /phorest\.com\/book\//i,
     /* Zenoti — webstore is a real scheduler, just login-gated */
-    /zenoti\.com\/(webstoreNew|webstore)\b/i,      /* ← NEW */
+    /zenoti\.com\/(webstoreNew|webstore)\b/i,
     /* Booksy */
     /booksy\.com\/en-[a-z]{2}\/[^/]+\/[^/]+\/\d+/i,
     /* Setmore */
@@ -476,10 +457,8 @@ const LIVE_SCHEDULER_URL_PATTERNS: RegExp[] = [
     /* Square Appointments */
     /squareup\.com\/appointments\/buyer/i,
     /square\.site\/book\//i,
-    /* GoHighLevel / LeadConnector — booking calendar widget
-     * (/widget/booking/) is a genuine time-slot picker,
-     * distinct from /widget/form/ which is a lead-capture form. */
-    /leadconnectorhq\.com\/widget\/booking\//i,     /* ← NEW */
+    /* GoHighLevel / LeadConnector */
+    /leadconnectorhq\.com\/widget\/booking\//i,
 ];
 
 function visitedUrlsShowLiveScheduler(visitedUrls: string[]): boolean {
@@ -490,11 +469,6 @@ function visitedUrlsShowLiveScheduler(visitedUrls: string[]): boolean {
 
 /* ══════════════════════════════════════════════════════════════
  *  Contact-form vendor iframe detection
- *
- *  CHANGED: added GoHighLevel/LeadConnector lead-capture form
- *  pattern (/widget/form/).  These are name+email+phone
- *  collection forms with CTAs like "SECURE THIS OFFER" —
- *  they are NOT scheduling interfaces.
  * ══════════════════════════════════════════════════════════════ */
 
 const CONTACT_FORM_VENDOR_URL_PATTERNS: RegExp[] = [
@@ -524,7 +498,7 @@ const CONTACT_FORM_VENDOR_URL_PATTERNS: RegExp[] = [
     /* 123FormBuilder */
     /123formbuilder\.com\/form/i,
     /* GoHighLevel / LeadConnector — lead-capture forms */
-    /leadconnectorhq\.com\/widget\/form\//i,        /* ← NEW */
+    /leadconnectorhq\.com\/widget\/form\//i,
 ];
 
 function urlsContainContactFormVendor(urls: string[]): boolean {
@@ -789,10 +763,7 @@ function contactFormOpts(visitedUrls: string[]): ContactFormOpts {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  NEW — Helper to build a forced-account-creation result for
- *  a detected gated vendor.  Centralises the pattern used by
- *  the no-entry path, post-entry path, and stalled fallback
- *  so every call site is consistent and DRY.
+ *  Helper to build a forced-account-creation result
  * ══════════════════════════════════════════════════════════════ */
 
 function buildGatedVendorResult(args: {
@@ -823,6 +794,7 @@ function buildGatedVendorResult(args: {
             appointmentSignals: args.snapshot.aggregate?.appointmentSignals ?? [],
             generalContactSignals: args.snapshot.aggregate?.generalContactSignals ?? [],
             schedulerSignals: args.snapshot.aggregate?.schedulerSignals ?? [],
+            bookingFlowSignals: [],
             filledFields: args.filledFields,
         },
     };
@@ -1249,22 +1221,6 @@ async function maybeRetryOrPush(args: {
 
 /* ══════════════════════════════════════════════════════════════
  *  Main request handler
- *
- *  KEY ACCURACY CHANGES (marked with ★ in comments):
- *
- *  ★1  Early Exit 1 now catches Zenoti (+ any future vendors
- *      added to ACCOUNT_GATED_VENDOR_PATTERNS).
- *
- *  ★2  `resolveVendor` + `detectVendorFromVisitedUrls` used
- *      as a fallback whenever `detectVendor(page)` returns
- *      nothing, so iframe-only vendor references are caught.
- *
- *  ★3  Vendor-gated check is performed BEFORE every
- *      contact-form-only classification, preventing
- *      lead-capture noise from overriding vendor detection.
- *
- *  ★4  `visitedUrlsShowVendorLoginGate` adds a URL-structure-
- *      based login-gate signal as a final safety net.
  * ══════════════════════════════════════════════════════════════ */
 
 router.addDefaultHandler(async ({ request, page, log, pushData }) => {
@@ -1297,9 +1253,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         }
     }
 
-    /* ★2  URL-based vendor fallback — catches vendors that
-     *     only appear in iframe srcs (e.g. Zenoti webstore
-     *     embedded in an iframe) when detectVendor missed them. */
+    /* URL-based vendor fallback */
     if (!firstVendor.name) {
         const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
         if (urlVendor) {
@@ -1309,11 +1263,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     }
 
     /* ══════════════════════════════════════════════
-     *  ★1  EARLY EXIT 1: account-gated vendor detected on homepage
-     *
-     *  Now that Zenoti is in ACCOUNT_GATED_VENDOR_PATTERNS, this
-     *  fires for Zenoti sites.  The haystack also includes
-     *  visitedUrls, so iframe-embedded vendor webstores are caught.
+     *  EARLY EXIT 1: account-gated vendor detected on homepage
      * ══════════════════════════════════════════════ */
     if (vendorRequiresAccountForOnlineBooking({ vendor: firstVendor, snapshot: { vendor: firstVendor }, visitedUrls })) {
         const vendorLabel = firstVendor.name || 'a detected vendor';
@@ -1334,6 +1284,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 appointmentSignals: [],
                 generalContactSignals: [],
                 schedulerSignals: [],
+                bookingFlowSignals: [],
                 filledFields: [],
             },
         };
@@ -1369,16 +1320,12 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         recordSnapshotUrls(visitedUrls, landingSnapshot);
         await collectAndRecordIframeUrls(page, visitedUrls);
 
-        /* ★2  Second-chance vendor detection after iframe URLs collected */
         const effectiveVendor = resolveVendor(
             firstVendor,
             detectVendorFromVisitedUrls(visitedUrls),
             landingSnapshot.vendor,
         );
 
-        /* ★3  Vendor-gated check BEFORE contact-form-only.
-         *     Prevents lead-capture forms (e.g. GHL /widget/form/)
-         *     from overriding a known-gated vendor. */
         if (vendorRequiresAccountForOnlineBooking({
             vendor: effectiveVendor,
             snapshot: landingSnapshot,
@@ -1400,8 +1347,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             return;
         }
 
-        /* ★4  URL-based login-gate fallback — catches vendor
-         *     webstore URLs that are known to always gate. */
         if (visitedUrlsShowVendorLoginGate(visitedUrls)) {
             const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
             const vendorLabel = urlVendor?.name ?? effectiveVendor.name ?? 'a detected vendor';
@@ -1444,6 +1389,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                         ...detectedSignals,
                     ]),
                     schedulerSignals: [],
+                    bookingFlowSignals: [],
                     filledFields: [],
                 },
             };
@@ -1475,6 +1421,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                         ...detectedSignals,
                     ]),
                     schedulerSignals: [],
+                    bookingFlowSignals: [],
                     filledFields: [],
                 },
             };
@@ -1500,6 +1447,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 appointmentSignals: [],
                 generalContactSignals: [],
                 schedulerSignals: [],
+                bookingFlowSignals: [],
                 filledFields: [],
             },
         };
@@ -1520,7 +1468,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     recordSnapshotUrls(visitedUrls, snapshot);
     await collectAndRecordIframeUrls(activePage, visitedUrls);
 
-    /* ★2  Resolve vendor from all available sources */
     let immediateVendor = resolveVendor(
         snapshot.vendor,
         firstVendor,
@@ -1556,7 +1503,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         return;
     }
 
-    /* ★4  URL-based login-gate check after entry click */
+    /* URL-based login-gate check after entry click */
     if (visitedUrlsShowVendorLoginGate(visitedUrls)) {
         const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
         const effectiveVendor = resolveVendor(urlVendor, immediateVendor);
@@ -1625,6 +1572,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                             appointmentSignals: [],
                             generalContactSignals: [],
                             schedulerSignals: snapshot.aggregate.schedulerSignals,
+                            bookingFlowSignals: [],
                             filledFields: [],
                         },
                     };
@@ -1656,6 +1604,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     appointmentSignals: [],
                     generalContactSignals: [],
                     schedulerSignals: snapshot.aggregate.schedulerSignals,
+                    bookingFlowSignals: [],
                     filledFields: [],
                 },
             };
@@ -1681,7 +1630,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     /* Final iframe collection after the flow completes */
     await collectAndRecordIframeUrls(activePage, visitedUrls);
 
-    /* ★2  Final vendor resolution from all accumulated evidence */
+    /* Final vendor resolution from all accumulated evidence */
     const bestVendor = resolveVendor(
         snapshot.vendor,
         immediateVendor,
@@ -1733,6 +1682,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 appointmentSignals: snapshot.aggregate.appointmentSignals,
                 generalContactSignals: snapshot.aggregate.generalContactSignals,
                 schedulerSignals: snapshot.aggregate.schedulerSignals,
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -1772,6 +1722,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                             ...snapshot.aggregate.schedulerSignals,
                             'visited-url: live-scheduler-detected',
                         ]),
+                        bookingFlowSignals: [],
                         filledFields: flow.filledFields,
                     },
                 };
@@ -1779,7 +1730,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 return;
             }
 
-            /* ★3  Vendor-gated check before contact-form-only in login-override path */
             if (vendorRequiresAccountForOnlineBooking({ vendor: bestVendor, snapshot, visitedUrls })) {
                 const vendorLabel = bestVendor.name || 'a detected vendor';
                 const result = buildGatedVendorResult({
@@ -1820,6 +1770,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                             ...detectedSignals,
                         ]),
                         schedulerSignals: snapshot.aggregate.schedulerSignals,
+                        bookingFlowSignals: [],
                         filledFields: flow.filledFields,
                     },
                 };
@@ -1845,6 +1796,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     appointmentSignals: snapshot.aggregate.appointmentSignals,
                     generalContactSignals: snapshot.aggregate.generalContactSignals,
                     schedulerSignals: snapshot.aggregate.schedulerSignals,
+                    bookingFlowSignals: [],
                     filledFields: flow.filledFields,
                 },
             };
@@ -1869,6 +1821,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 appointmentSignals: [],
                 generalContactSignals: [],
                 schedulerSignals: snapshot.aggregate.schedulerSignals,
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -1900,6 +1853,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...snapshot.aggregate.schedulerSignals,
                     ...withPrefix('payment', snapshot.aggregate.paymentSignals),
                 ]),
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -1931,6 +1885,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...snapshot.aggregate.schedulerSignals,
                     ...withPrefix('review', snapshot.aggregate.terminalSignals),
                 ]),
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -1942,7 +1897,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     /* ── Contact / request form only ── */
 
     if (flow.stopReason === 'contact_form') {
-        /* ★3  Vendor-gated check BEFORE contact-form-only classification */
         const vendorOverride = vendorRequiresAccountForOnlineBooking({
             vendor: bestVendor,
             snapshot,
@@ -1967,7 +1921,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             return;
         }
 
-        /* ★4  URL-based login-gate fallback */
         if (visitedUrlsShowVendorLoginGate(visitedUrls)) {
             const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
             const effectiveVendor = resolveVendor(urlVendor, bestVendor);
@@ -2009,6 +1962,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...detectedSignals,
                 ]),
                 schedulerSignals: snapshot.aggregate.schedulerSignals,
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -2072,6 +2026,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...snapshot.aggregate.schedulerSignals,
                     ...(highConfidence ? ['visited-url: live-scheduler-detected'] : []),
                 ]),
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -2086,7 +2041,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
     /* ── Fallback: ambiguous outcome ── */
 
-    /* ★3  Vendor-gated check before the final ambiguous block */
     const stalledVendorOverride = vendorRequiresAccountForOnlineBooking({
         vendor: bestVendor,
         snapshot,
@@ -2111,7 +2065,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         return;
     }
 
-    /* ★4  URL-based login-gate check at the very end */
     if (visitedUrlsShowVendorLoginGate(visitedUrls)) {
         const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
         const effectiveVendor = resolveVendor(urlVendor, bestVendor);
@@ -2156,6 +2109,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...detectedSignals,
                 ]),
                 schedulerSignals: snapshot.aggregate.schedulerSignals,
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -2186,6 +2140,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     ...detectedSignals,
                 ]),
                 schedulerSignals: snapshot.aggregate.schedulerSignals,
+                bookingFlowSignals: [],
                 filledFields: flow.filledFields,
             },
         };
@@ -2213,6 +2168,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             appointmentSignals: snapshot.aggregate.appointmentSignals,
             generalContactSignals: snapshot.aggregate.generalContactSignals,
             schedulerSignals: snapshot.aggregate.schedulerSignals,
+            bookingFlowSignals: [],
             filledFields: flow.filledFields,
         },
     };
