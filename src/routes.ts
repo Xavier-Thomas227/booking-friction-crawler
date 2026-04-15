@@ -1366,7 +1366,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         }
 
         /* ── Before flagging manual review, check for contact-form-only site ── */
-        if (isContactFormOnlySite(landingSnapshot, contactFormOpts(visitedUrls))) {
+        if (!effectiveVendor.name && isContactFormOnlySite(landingSnapshot, contactFormOpts(visitedUrls))) {
             const detectedSignals = gatherContactOnlySignals(landingSnapshot, contactFormOpts(visitedUrls));
 
             const result: ClassificationResult = {
@@ -1747,7 +1747,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 return;
             }
 
-            if (isContactFormOnlySite(snapshot, contactFormOpts(visitedUrls))) {
+            if (!bestVendor.name && isContactFormOnlySite(snapshot, contactFormOpts(visitedUrls))) {
                 const detectedSignals = gatherContactOnlySignals(snapshot, contactFormOpts(visitedUrls));
                 const result: ClassificationResult = {
                     url: request.url,
@@ -2086,7 +2086,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
     /* Stalled with no scheduler — check for contact-form-only site */
 
-    if (isContactFormOnlySite(snapshot, contactFormOpts(visitedUrls))) {
+    if (!bestVendor.name && isContactFormOnlySite(snapshot, contactFormOpts(visitedUrls))) {
         const detectedSignals = gatherContactOnlySignals(snapshot, contactFormOpts(visitedUrls));
         const result: ClassificationResult = {
             url: request.url,
@@ -2175,3 +2175,4 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
     await maybeRetryOrPush({ request, pushData, result });
 });
+
