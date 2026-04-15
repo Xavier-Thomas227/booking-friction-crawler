@@ -15,6 +15,7 @@ export type ClassificationResult = {
         appointmentSignals: string[];
         generalContactSignals: string[];
         schedulerSignals: string[];
+        bookingFlowSignals: string[];
         filledFields: string[];
     };
 };
@@ -81,6 +82,7 @@ export type SurfaceScan = {
     appointmentSignals: string[];
     generalContactSignals: string[];
     schedulerSignals: string[];
+    bookingFlowSignals: string[];
 };
 
 export type BookingSnapshot = {
@@ -98,6 +100,7 @@ export type BookingSnapshot = {
         appointmentSignals: string[];
         generalContactSignals: string[];
         schedulerSignals: string[];
+        bookingFlowSignals: string[];
     };
 };
 

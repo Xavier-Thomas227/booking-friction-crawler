@@ -90,6 +90,73 @@ const GENERAL_CONTACT_PHRASES = [
     'ask a question',
 ];
 
+// ── FIX: phrases that confirm the form is PASSIVE (business contacts you back)
+// If none of these are present, the form is more likely part of a live booking flow.
+const PASSIVE_FORM_PHRASES = [
+    'we will contact you',
+    'we\'ll contact you',
+    'we will reach out',
+    'we\'ll reach out',
+    'we\'ll get back to you',
+    'we will get back to you',
+    'request appointment',
+    'appointment request',
+    'request consultation',
+    'submit request',
+    'send request',
+    'inquiry',
+    'enquiry',
+];
+
+// ── FIX: phrases that indicate we're INSIDE a booking flow (past service/time selection)
+// The customer-details step of live schedulers shows these.
+const BOOKING_FLOW_CONTEXT_PHRASES = [
+    'your appointment',
+    'appointment details',
+    'booking details',
+    'your booking',
+    'your order',
+    'order summary',
+    'your information',
+    'your details',
+    'your contact',
+    'client details',
+    'customer details',
+    'contact information',
+    'personal details',
+    'personal information',
+    'add a note',
+    'notes for your',
+    'selected service',
+    'selected staff',
+    'appointment time',
+    'booking time',
+    'cancellation policy',
+    'no-show',
+    'no show',
+];
+
+// ── FIX: CTA text patterns on booking buttons — indicates live booking, not contact form
+const BOOKING_CTA_PHRASES = [
+    'book appointment',
+    'book now',
+    'book this',
+    'complete booking',
+    'complete appointment',
+    'confirm booking',
+    'confirm appointment',
+    'schedule appointment',
+    'schedule now',
+    'reserve appointment',
+    'place booking',
+    'finish booking',
+    'submit booking',
+    'confirm and book',
+    'confirm and pay',
+    'complete and pay',
+    'pay and book',
+];
+
 const SCHEDULER_PHRASES = [
     'select a service',
     'choose a service',
@@ -121,7 +188,6 @@ const PAYMENT_PHRASES = [
     'billing address',
     'payment method',
     'pay now',
-    // ── NEW: checkout / transactional signals ──
     'card on file',
     'checkout',
     'due today',
@@ -139,9 +205,14 @@ const TERMINAL_BOOKING_PHRASES = [
     'complete booking',
     'final step',
     'almost done',
-    // ── NEW: common CTA on vendor checkout pages ──
     'book appointment',
     'complete appointment',
+    // ── FIX: more terminal / CTA phrases that appear on the last step
+    'book now',
+    'schedule appointment',
+    'confirm and book',
+    'confirm and pay',
+    'complete and pay',
 ];
 
 const DISALLOWED_HOST_PATTERNS = [
@@ -161,16 +232,7 @@ const DISALLOWED_HOST_PATTERNS = [
     'googleadservices.com',
 ];
 
-/**
- * URL patterns for infrastructure / utility iframes that should NEVER be
- * scanned as booking surfaces.  These frames are pre-loaded by vendors for
- * payment processing, consent management, analytics, live-chat widgets,
- * etc.  They contain signals (e.g. Stripe card fields) that can cause
- * false-positive payment-step classifications when the user hasn't
- * actually reached payment yet.
- */
 const INFRASTRUCTURE_FRAME_PATTERNS = [
-    // Payment infrastructure (pre-loaded; only relevant at actual checkout)
     'stripe.com',
     'stripe.network',
     'js.stripe.com',
@@ -182,16 +244,12 @@ const INFRASTRUCTURE_FRAME_PATTERNS = [
     'paypalobjects.com',
     'sq-payment',
     'squarecdn.com',
-
-    // Cookie / consent management
     'cookiebot.com',
     'consentcdn',
     'onetrust.com',
     'cookielaw.org',
     'trustarc.com',
     'privacymanager.io',
-
-    // Analytics / tracking
     'googletagmanager.com',
     'google-analytics.com',
     'doubleclick.net',
@@ -211,8 +269,6 @@ const INFRASTRUCTURE_FRAME_PATTERNS = [
     'heapanalytics.com',
     'amplitude.com',
     'sentry.io',
-
-    // Live chat / support widgets
     'intercom.io',
     'intercomcdn.com',
     'crisp.chat',
@@ -221,17 +277,11 @@ const INFRASTRUCTURE_FRAME_PATTERNS = [
     'zendesk.com',
     'drift.com',
     'hubspot.com',
-
-    // reCAPTCHA / bot protection
     'recaptcha',
     'hcaptcha.com',
     'challenges.cloudflare.com',
 ];
 
-/**
- * Returns true if the given frame URL belongs to infrastructure / utility
- * content that should not be scanned as a booking surface.
- */
 function isInfrastructureFrameUrl(url: string): boolean {
     if (!url || url === 'about:blank') return true;
     const lower = url.toLowerCase();
@@ -259,7 +309,6 @@ export const STRONG_LIVE_SCHEDULER_SIGNALS = new Set([
     'priced services',
     'service durations',
     'add another service',
-    // ── NEW: time-period section headers (Square, Fresha, etc.) ──
     'time section headers',
 ]);
 
@@ -565,14 +614,6 @@ export async function getSurfaces(page: any): Promise<Surface[]> {
         const host = getHostname(url);
 
         if (host && isDisallowedHost(host)) return;
-
-        /* ── Skip infrastructure / utility iframes ──
-         * These include payment processors (Stripe), cookie consent
-         * (Cookiebot), analytics, live-chat widgets, etc.  They are
-         * pre-loaded by many vendor platforms and contain signals
-         * (e.g. Stripe card fields) that cause false-positive payment
-         * classifications when the user hasn't actually reached the
-         * checkout step yet. */
         if (isInfrastructureFrameUrl(url)) return;
 
         surfaces.push({
@@ -667,6 +708,8 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     const appointmentSignals = new Set<string>();
     const generalContactSignals = new Set<string>();
     const schedulerSignals = new Set<string>();
+    // ── FIX: new signal set for booking-flow context ──
+    const bookingFlowSignals = new Set<string>();
 
     if (passwordCount > 0) loginSignals.add('password input');
     if (emailCount > 0) loginSignals.add('email input');
@@ -719,8 +762,6 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
         schedulerSignals.add('calendar day choice');
     }
 
-    // ── NEW: detect time-period section headers (Morning / Afternoon / Evening)
-    // Common in Square Appointments, Fresha, and similar vendor UIs.
     const hasTimeSectionHeaders =
         (bodyText.includes('morning') || bodyText.includes('afternoon') || bodyText.includes('evening')) &&
         timeLikeCount >= 1;
@@ -740,12 +781,73 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
 
     const liveSchedulerSignals = [...schedulerSignals].filter((signal) => STRONG_LIVE_SCHEDULER_SIGNALS.has(signal));
 
-    // ── NEW: detect checkout URL patterns ──
     const urlLooksCheckout = ['/checkout', '/payment', '/pay']
         .some((part) => normalize(surface.url).includes(part));
 
-    // ── NEW: detect "appointment held" — strong real-time booking signal ──
     const hasAppointmentHeld = bodyText.includes('appointment held');
+
+    // ── FIX: Detect booking-flow context ──
+    // These signals indicate we're INSIDE a live booking flow (past service/time
+    // selection, now at the customer-details or review step) — NOT a standalone
+    // "contact us" or "request appointment" form.
+
+    // 1) Body text phrases that appear on the customer-details / review step
+    for (const hit of includesAny(bodyText, BOOKING_FLOW_CONTEXT_PHRASES)) {
+        bookingFlowSignals.add(hit);
+    }
+
+    // 2) Booking CTA buttons (Book Appointment, Book Now, Complete Booking, etc.)
+    //    These appear in interactive items (buttons / links) and prove we're in a
+    //    booking flow where the user is about to BOOK, not "request" or "inquire".
+    for (const item of interactiveItems) {
+        if (!item.visible || item.disabled || item.ariaDisabled) continue;
+        const text = itemText(item);
+        for (const phrase of BOOKING_CTA_PHRASES) {
+            if (text.includes(phrase)) {
+                bookingFlowSignals.add(`cta:${phrase}`);
+            }
+        }
+        // A single visible "Book" button (not link) is also a CTA signal
+        if (text === 'book') {
+            bookingFlowSignals.add('cta:book');
+        }
+    }
+
+    // 3) URL patterns that indicate booking flow
+    const urlLooksBooking = ['/book', '/booking', '/schedule', '/appointment', '/reserve']
+        .some((part) => normalize(surface.url).includes(part));
+    if (urlLooksBooking) bookingFlowSignals.add('booking url');
+
+    // 4) Known vendor host
+    const surfaceHost = getHostname(surface.url);
+    if (isKnownVendorHost(surfaceHost)) bookingFlowSignals.add('vendor host');
+
+    // 5) Vendor asset detected anywhere on the page (iframes, scripts, etc.)
+    //    — catches embedded widgets on non-vendor hosts
+    const allFrameUrls = (surface.root.frames?.() || []).map((f: any) => f.url?.() || '').filter(Boolean);
+    const hasVendorFrame = allFrameUrls.some((url: string) => isKnownVendorHost(getHostname(url)));
+    if (hasVendorFrame) bookingFlowSignals.add('vendor frame');
+
+    // 6) Check if the page contains a service summary with price/duration
+    //    (this means a service was already selected — we're past service_list)
+    const hasServiceSummary =
+        (/\$\s?\d/.test(bodyText) || /\b\d+\s?(min|mins|minute|minutes)\b/i.test(bodyText)) &&
+        (bodyText.includes('your appointment') ||
+         bodyText.includes('your order') ||
+         bodyText.includes('appointment details') ||
+         bodyText.includes('booking details') ||
+         bodyText.includes('selected service'));
+    if (hasServiceSummary) bookingFlowSignals.add('service summary');
+
+    // 7) Check if we have PASSIVE form indicators — "we will contact you", etc.
+    //    These are the opposite of booking-flow: they mean the form sends a request
+    //    and the business follows up later.
+    const passiveFormHits = includesAny(bodyText, PASSIVE_FORM_PHRASES);
+    const isPassiveForm = passiveFormHits.length > 0;
+
+    // ── Derive composite flags ──
+    const hasBookingFlowContext = bookingFlowSignals.size >= 2;
+    const hasStrongBookingFlowContext = bookingFlowSignals.size >= 3;
 
     // ─── Competitive scoring: every state scored independently ───
 
@@ -775,29 +877,17 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     ])) {
         scores.login_gate += 3;
     }
-    // negative: if services with prices dominate, less likely to be login
     if (schedulerSignals.has('priced services') && schedulerSignals.size >= 3) scores.login_gate -= 2;
-    // ── NEW: if payment signals are strong, this is checkout not a login gate ──
     if (paymentSignals.size >= 2) scores.login_gate -= 3;
     if (urlLooksCheckout) scores.login_gate -= 3;
 
     // --- payment ---
-    //
-    // IMPORTANT: only count payment signals that come from the MAIN page
-    // body text — not from pre-loaded infrastructure iframes.
-    // Infrastructure frames (Stripe, etc.) are now filtered out of the
-    // surface list entirely, but we still guard here: payment iframe
-    // signals alone (without payment-related body text on the main page)
-    // should not be enough to classify as payment.
     if (visiblePaymentFieldCount > 0) scores.payment += 5;
     if (visiblePaymentIframeCount > 0 && paymentSignals.size >= 2) scores.payment += 4;
     else if (visiblePaymentIframeCount > 0) scores.payment += 1;
     if (paymentSignals.size >= 2) scores.payment += 3;
-    // ── NEW: checkout URL is a strong indicator ──
     if (urlLooksCheckout) scores.payment += 3;
-    // ── NEW: "appointment held" means real-time transactional checkout ──
     if (hasAppointmentHeld) scores.payment += 3;
-    // negative: service list signals strongly suggest we haven't reached checkout
     if (schedulerSignals.has('priced services') && visiblePaymentFieldCount === 0 && visiblePaymentIframeCount === 0) scores.payment -= 3;
     if (schedulerSignals.has('priced services') && schedulerSignals.has('multiple book buttons')) scores.payment -= 4;
     if (schedulerSignals.has('service durations') && schedulerSignals.has('multiple book buttons')) scores.payment -= 3;
@@ -805,8 +895,15 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     // --- review ---
     if (terminalSignals.size >= 1) scores.review += 4;
     if (terminalSignals.size >= 2) scores.review += 3;
-    // ── NEW: "appointment held" is a strong review/checkout signal ──
     if (hasAppointmentHeld) scores.review += 2;
+    // ── FIX: booking flow context with a form = review, not contact_form ──
+    // When we detect booking-flow context (CTA, vendor, service summary, etc.)
+    // alongside a form, this is the customer-details / review step.
+    if (hasBookingFlowContext && visibleForms > 0) scores.review += 4;
+    if (hasStrongBookingFlowContext) scores.review += 3;
+    // Booking CTA specifically boosts review
+    const hasBookingCta = [...bookingFlowSignals].some((s) => s.startsWith('cta:'));
+    if (hasBookingCta) scores.review += 3;
 
     // --- service_list ---
     if (combinedText.includes('select a service') || combinedText.includes('choose a service')) scores.service_list += 5;
@@ -815,7 +912,6 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     if (schedulerSignals.has('priced services')) scores.service_list += 3;
     if (schedulerSignals.has('service durations')) scores.service_list += 3;
     if (visibleBooks >= 2) scores.service_list += 3;
-    // negative: real calendar or many time slots suggest this isn't a service page
     if (timeLikeCount >= 4) scores.service_list -= 2;
     if (calendarDayCount >= 7) scores.service_list -= 2;
 
@@ -825,9 +921,7 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     else if (timeLikeCount >= 1) scores.time_picker += 2;
     if (combinedText.includes('available times')) scores.time_picker += 4;
     if (combinedText.includes('select a time') || combinedText.includes('choose a time')) scores.time_picker += 4;
-    // ── NEW: time section headers boost time_picker ──
     if (hasTimeSectionHeaders) scores.time_picker += 3;
-    // negative: priced services strongly suggest service page, not time page
     if (schedulerSignals.has('priced services')) scores.time_picker -= 3;
     if (schedulerSignals.has('service durations')) scores.time_picker -= 2;
     if (combinedText.includes('select a service') || combinedText.includes('choose a service')) scores.time_picker -= 3;
@@ -838,44 +932,56 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     else if (calendarDayCount >= 3 && hasCalendarContext(bodyText)) scores.date_picker += 3;
     if (combinedText.includes('select date') || combinedText.includes('choose date')) scores.date_picker += 3;
     if (combinedText.includes('select date & time')) scores.date_picker += 2;
-    // negative: service signals
     if (schedulerSignals.has('priced services')) scores.date_picker -= 2;
     if (combinedText.includes('select a service') || combinedText.includes('choose a service')) scores.date_picker -= 2;
 
     // --- contact_form ---
-    if (visibleForms > 0 && appointmentSignals.size > 0) scores.contact_form += 3;
-    if (appointmentSignals.size >= 2) scores.contact_form += 2;
-    if (generalContactSignals.size >= 1 && appointmentSignals.size >= 1) scores.contact_form += 2;
-    // negative: live scheduler signals mean it's not a dumb contact form
+    // ── FIX: Only award positive points when there's actual PASSIVE form evidence.
+    // The old logic gave +3 just for having a form + appointmentSignals, which
+    // fires on the customer-details step of every booking platform.
+    // Now we require either (a) passive form phrases or (b) no booking flow context.
+    if (isPassiveForm && visibleForms > 0 && appointmentSignals.size > 0) scores.contact_form += 4;
+    else if (visibleForms > 0 && appointmentSignals.size > 0 && !hasBookingFlowContext) scores.contact_form += 3;
+
+    if (isPassiveForm && appointmentSignals.size >= 2) scores.contact_form += 3;
+    else if (appointmentSignals.size >= 2 && !hasBookingFlowContext) scores.contact_form += 2;
+
+    if (generalContactSignals.size >= 1 && appointmentSignals.size >= 1 && !hasBookingFlowContext) scores.contact_form += 2;
+
+    // existing negatives
     if (liveSchedulerSignals.length >= 2) scores.contact_form -= 3;
     if (timeLikeCount >= 1) scores.contact_form -= 2;
     if (calendarDayCount >= 3) scores.contact_form -= 2;
-    // ── NEW: payment / checkout evidence strongly rules out contact_form ──
     if (paymentSignals.size >= 2) scores.contact_form -= 4;
     if (urlLooksCheckout) scores.contact_form -= 4;
     if (terminalSignals.size >= 1) scores.contact_form -= 3;
     if (hasAppointmentHeld) scores.contact_form -= 3;
 
-    // --- unknown (fallback for scheduler-like pages) ---
-    if (schedulerSignals.size > 0 || isKnownVendorHost(getHostname(surface.url))) {
-        scores.unknown = 1 + Math.min(schedulerSignals.size, 5);
-    }
+    // ── FIX: booking-flow context is the strongest negative for contact_form ──
+    // This is the core fix: when we know we're inside a booking flow, contact_form
+    // should not win. The penalty scales with evidence strength.
+    if (hasBookingFlowContext) scores.contact_form -= 5;
+    if (hasStrongBookingFlowContext) scores.contact_form -= 4;
+    if (hasBookingCta) scores.contact_form -= 3;
+    if (urlLooksBooking) scores.contact_form -= 2;
 
-    // ─── Known booking vendor correction ───
-    // A recognized booking platform (Square, Vagaro, Zenoti, etc.) is
-    // almost never a plain contact form.  When the surface lives on a
-    // known vendor host, suppress the contact_form score and give a
-    // small boost to scheduler states so that even weak scheduler
-    // signals outrank a false-positive contact_form classification.
-    const surfaceHost = getHostname(surface.url);
+    // Known vendor host (kept from before, now stacks with booking-flow context)
     if (isKnownVendorHost(surfaceHost)) {
         scores.contact_form -= 4;
-
         if (schedulerSignals.size > 0) {
             scores.service_list += 2;
             scores.time_picker += 2;
             scores.date_picker += 2;
         }
+    }
+
+    // --- unknown (fallback for scheduler-like pages) ---
+    if (schedulerSignals.size > 0 || isKnownVendorHost(surfaceHost)) {
+        scores.unknown = 1 + Math.min(schedulerSignals.size, 5);
+    }
+    // ── FIX: booking flow context with no other strong state → unknown beats contact_form
+    if (hasBookingFlowContext && scores.unknown < 3) {
+        scores.unknown = 3 + bookingFlowSignals.size;
     }
 
     // Pick the highest-scoring state
@@ -905,6 +1011,7 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
         appointmentSignals: [...appointmentSignals],
         generalContactSignals: [...generalContactSignals],
         schedulerSignals: [...schedulerSignals],
+        bookingFlowSignals: [...bookingFlowSignals],
     };
 }
 
@@ -945,6 +1052,7 @@ export async function buildSnapshot(page: any): Promise<BookingSnapshot> {
             appointmentSignals: unique(scans.flatMap((scan) => scan.appointmentSignals)),
             generalContactSignals: unique(scans.flatMap((scan) => scan.generalContactSignals)),
             schedulerSignals: unique(scans.flatMap((scan) => scan.schedulerSignals)),
+            bookingFlowSignals: unique(scans.flatMap((scan) => scan.bookingFlowSignals)),
         },
     };
 }
@@ -970,5 +1078,6 @@ export function hasMeaningfulProgress(before: BookingSnapshot, after: BookingSna
     if (after.aggregate.loginSignals.length > before.aggregate.loginSignals.length) return true;
     if (after.aggregate.paymentSignals.length > before.aggregate.paymentSignals.length) return true;
     if (after.aggregate.terminalSignals.length > before.aggregate.terminalSignals.length) return true;
+    if (after.aggregate.bookingFlowSignals.length > before.aggregate.bookingFlowSignals.length) return true;
     return false;
 }
