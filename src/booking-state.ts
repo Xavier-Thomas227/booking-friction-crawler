@@ -121,6 +121,12 @@ const PAYMENT_PHRASES = [
     'billing address',
     'payment method',
     'pay now',
+    // ── NEW: checkout / transactional signals ──
+    'card on file',
+    'checkout',
+    'due today',
+    'due at appointment',
+    'subtotal',
 ];
 
 const TERMINAL_BOOKING_PHRASES = [
@@ -133,6 +139,9 @@ const TERMINAL_BOOKING_PHRASES = [
     'complete booking',
     'final step',
     'almost done',
+    // ── NEW: common CTA on vendor checkout pages ──
+    'book appointment',
+    'complete appointment',
 ];
 
 const DISALLOWED_HOST_PATTERNS = [
@@ -250,6 +259,8 @@ export const STRONG_LIVE_SCHEDULER_SIGNALS = new Set([
     'priced services',
     'service durations',
     'add another service',
+    // ── NEW: time-period section headers (Square, Fresha, etc.) ──
+    'time section headers',
 ]);
 
 export function normalize(text: string | null | undefined): string {
@@ -708,6 +719,13 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
         schedulerSignals.add('calendar day choice');
     }
 
+    // ── NEW: detect time-period section headers (Morning / Afternoon / Evening)
+    // Common in Square Appointments, Fresha, and similar vendor UIs.
+    const hasTimeSectionHeaders =
+        (bodyText.includes('morning') || bodyText.includes('afternoon') || bodyText.includes('evening')) &&
+        timeLikeCount >= 1;
+    if (hasTimeSectionHeaders) schedulerSignals.add('time section headers');
+
     for (const control of controlItems) {
         const meta = normalize(control.meta);
 
@@ -721,6 +739,13 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     }
 
     const liveSchedulerSignals = [...schedulerSignals].filter((signal) => STRONG_LIVE_SCHEDULER_SIGNALS.has(signal));
+
+    // ── NEW: detect checkout URL patterns ──
+    const urlLooksCheckout = ['/checkout', '/payment', '/pay']
+        .some((part) => normalize(surface.url).includes(part));
+
+    // ── NEW: detect "appointment held" — strong real-time booking signal ──
+    const hasAppointmentHeld = bodyText.includes('appointment held');
 
     // ─── Competitive scoring: every state scored independently ───
 
@@ -752,6 +777,9 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     }
     // negative: if services with prices dominate, less likely to be login
     if (schedulerSignals.has('priced services') && schedulerSignals.size >= 3) scores.login_gate -= 2;
+    // ── NEW: if payment signals are strong, this is checkout not a login gate ──
+    if (paymentSignals.size >= 2) scores.login_gate -= 3;
+    if (urlLooksCheckout) scores.login_gate -= 3;
 
     // --- payment ---
     //
@@ -765,6 +793,10 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     if (visiblePaymentIframeCount > 0 && paymentSignals.size >= 2) scores.payment += 4;
     else if (visiblePaymentIframeCount > 0) scores.payment += 1;
     if (paymentSignals.size >= 2) scores.payment += 3;
+    // ── NEW: checkout URL is a strong indicator ──
+    if (urlLooksCheckout) scores.payment += 3;
+    // ── NEW: "appointment held" means real-time transactional checkout ──
+    if (hasAppointmentHeld) scores.payment += 3;
     // negative: service list signals strongly suggest we haven't reached checkout
     if (schedulerSignals.has('priced services') && visiblePaymentFieldCount === 0 && visiblePaymentIframeCount === 0) scores.payment -= 3;
     if (schedulerSignals.has('priced services') && schedulerSignals.has('multiple book buttons')) scores.payment -= 4;
@@ -773,6 +805,8 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     // --- review ---
     if (terminalSignals.size >= 1) scores.review += 4;
     if (terminalSignals.size >= 2) scores.review += 3;
+    // ── NEW: "appointment held" is a strong review/checkout signal ──
+    if (hasAppointmentHeld) scores.review += 2;
 
     // --- service_list ---
     if (combinedText.includes('select a service') || combinedText.includes('choose a service')) scores.service_list += 5;
@@ -791,6 +825,8 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     else if (timeLikeCount >= 1) scores.time_picker += 2;
     if (combinedText.includes('available times')) scores.time_picker += 4;
     if (combinedText.includes('select a time') || combinedText.includes('choose a time')) scores.time_picker += 4;
+    // ── NEW: time section headers boost time_picker ──
+    if (hasTimeSectionHeaders) scores.time_picker += 3;
     // negative: priced services strongly suggest service page, not time page
     if (schedulerSignals.has('priced services')) scores.time_picker -= 3;
     if (schedulerSignals.has('service durations')) scores.time_picker -= 2;
@@ -814,6 +850,11 @@ export async function scanSurface(surface: Surface): Promise<SurfaceScan> {
     if (liveSchedulerSignals.length >= 2) scores.contact_form -= 3;
     if (timeLikeCount >= 1) scores.contact_form -= 2;
     if (calendarDayCount >= 3) scores.contact_form -= 2;
+    // ── NEW: payment / checkout evidence strongly rules out contact_form ──
+    if (paymentSignals.size >= 2) scores.contact_form -= 4;
+    if (urlLooksCheckout) scores.contact_form -= 4;
+    if (terminalSignals.size >= 1) scores.contact_form -= 3;
+    if (hasAppointmentHeld) scores.contact_form -= 3;
 
     // --- unknown (fallback for scheduler-like pages) ---
     if (schedulerSignals.size > 0 || isKnownVendorHost(getHostname(surface.url))) {
