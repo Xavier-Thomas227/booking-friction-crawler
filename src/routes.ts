@@ -1871,7 +1871,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     const onNewPage = (p: any) => { popupPage = p; };
     page.context().on('page', onNewPage);
 
-    const entry = await clickBookingEntry(page, strategy, attemptedActions, log);
+    const entry = await clickBookingEntry(page, strategy, entryAttempted, log);
 
     await page.waitForTimeout(2000);
     page.context().off('page', onNewPage);
