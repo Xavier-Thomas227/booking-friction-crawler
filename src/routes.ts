@@ -763,6 +763,535 @@ function contactFormOpts(visitedUrls: string[]): ContactFormOpts {
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 1 & 8: Network request interception
+ *                 & availability-fetch detection
+ * ══════════════════════════════════════════════════════════════ */
+
+const VENDOR_API_URL_PATTERNS: RegExp[] = [
+    /zenoti\.com\/api\//i,
+    /vagaro\.com\/(api|Ajax)\//i,
+    /mindbodyonline\.com\/api\//i,
+    /go\.booker\.com\/api\//i,
+    /fresha\.com\/api\//i,
+    /glossgenius\.com\/api\//i,
+    /joinblvd\.com\/api\//i,
+    /boulevard\.io\/api\//i,
+    /mangomint\.com\/api\//i,
+    /booksy\.com\/api\//i,
+    /acuityscheduling\.com\/api\//i,
+    /calendly\.com\/api\//i,
+    /squareup\.com\/api\//i,
+    /phorest\.com\/api\//i,
+    /gettimely\.com\/api\//i,
+    /setmore\.com\/api\//i,
+    /simplybook\.me\/.*api/i,
+    /appointy\.com\/api\//i,
+    /leadconnectorhq\.com\/.*api/i,
+];
+
+const AVAILABILITY_FETCH_PATTERNS: RegExp[] = [
+    /\/slots\b/i,
+    /\/time.?slots\b/i,
+    /\/availabilit(y|ies)\b/i,
+    /\/available.?times?\b/i,
+    /\/available.?dates?\b/i,
+    /\/openings?\b/i,
+    /\/schedule\/available/i,
+    /\/get.?available/i,
+    /\/appointments?\/available/i,
+    /\/free.?slots/i,
+    /\/calendar.?slots/i,
+    /\/booking.?slots/i,
+    /\/open.?slots/i,
+];
+
+class NetworkMonitor {
+    vendorApiHits: string[] = [];
+    availabilityFetches: string[] = [];
+    private _handler: ((req: any) => void) | null = null;
+
+    start(page: any): void {
+        this._handler = (req: any) => {
+            try {
+                const url: string = req.url();
+                for (const pattern of VENDOR_API_URL_PATTERNS) {
+                    if (pattern.test(url)) {
+                        this.vendorApiHits.push(url);
+                        break;
+                    }
+                }
+                for (const pattern of AVAILABILITY_FETCH_PATTERNS) {
+                    if (pattern.test(url)) {
+                        this.availabilityFetches.push(url);
+                        break;
+                    }
+                }
+            } catch { /* request may already be disposed */ }
+        };
+        page.on('request', this._handler);
+    }
+
+    stop(page: any): void {
+        if (this._handler) {
+            try { page.off('request', this._handler); } catch { /* ignore */ }
+            this._handler = null;
+        }
+    }
+
+    hasAvailabilityFetches(): boolean {
+        return this.availabilityFetches.length > 0;
+    }
+
+    hasVendorApiHits(): boolean {
+        return this.vendorApiHits.length > 0;
+    }
+
+    detectVendorFromApiHits(): { name: string; match: string } | null {
+        for (const url of this.vendorApiHits) {
+            for (const { pattern, name } of VENDOR_URL_DETECTION_PATTERNS) {
+                if (pattern.test(url)) {
+                    return { name, match: `api-request: ${url.substring(0, 120)}` };
+                }
+            }
+        }
+        return null;
+    }
+
+    toSchedulerSignals(): string[] {
+        const signals: string[] = [];
+        if (this.availabilityFetches.length > 0) {
+            signals.push('network: availability-api-detected');
+            for (const url of this.availabilityFetches.slice(0, 3)) {
+                signals.push(`network-availability: ${url.substring(0, 120)}`);
+            }
+        }
+        if (this.vendorApiHits.length > 0) {
+            signals.push('network: vendor-api-detected');
+        }
+        return signals;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 2: Visible password-field detection
+ * ══════════════════════════════════════════════════════════════ */
+
+async function detectVisiblePasswordField(page: any): Promise<boolean> {
+    try {
+        return await page.evaluate(() => {
+            for (const input of document.querySelectorAll('input[type="password"]')) {
+                const el = input as HTMLElement;
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (
+                    rect.width > 0 &&
+                    rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    style.opacity !== '0'
+                ) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    } catch {
+        return false;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 3: Guest-checkout detection & click
+ * ══════════════════════════════════════════════════════════════ */
+
+const GUEST_CHECKOUT_PATTERNS: RegExp[] = [
+    /continue\s+as\s+guest/i,
+    /guest\s+checkout/i,
+    /checkout\s+as\s+guest/i,
+    /skip\s+(login|sign.?in|account)/i,
+    /book\s+without\s+(an?\s+)?account/i,
+    /no\s+account\s+(needed|required)/i,
+    /proceed\s+without\s+(login|sign)/i,
+    /continue\s+without\s+(login|sign|account)/i,
+];
+
+async function tryClickGuestCheckout(page: any, log: any): Promise<boolean> {
+    try {
+        const sources = GUEST_CHECKOUT_PATTERNS.map((r) => r.source);
+        const result: { clicked: boolean; text: string | null } = await page.evaluate(
+            (patternSources: string[]) => {
+                const regexps = patternSources.map((s) => new RegExp(s, 'i'));
+                for (const el of document.querySelectorAll(
+                    'a, button, [role="button"], input[type="submit"], [tabindex="0"]',
+                )) {
+                    const htmlEl = el as HTMLElement;
+                    const rect = htmlEl.getBoundingClientRect();
+                    const style = window.getComputedStyle(htmlEl);
+                    if (
+                        rect.width === 0 ||
+                        rect.height === 0 ||
+                        style.display === 'none' ||
+                        style.visibility === 'hidden'
+                    ) continue;
+
+                    const text =
+                        htmlEl.innerText?.trim() ||
+                        (el as HTMLInputElement).value?.trim() ||
+                        el.getAttribute('aria-label')?.trim() ||
+                        '';
+                    for (const re of regexps) {
+                        if (re.test(text)) {
+                            htmlEl.click();
+                            return { clicked: true, text: text.substring(0, 80) };
+                        }
+                    }
+                }
+                return { clicked: false, text: null };
+            },
+            sources,
+        );
+
+        if (result.clicked) {
+            log.info('Clicked guest checkout option', { text: result.text });
+            await page.waitForTimeout(2000);
+            return true;
+        }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 4: Breadcrumb / progress-step account detection
+ * ══════════════════════════════════════════════════════════════ */
+
+async function detectAccountStepInProgress(page: any): Promise<{
+    found: boolean;
+    signals: string[];
+}> {
+    try {
+        return await page.evaluate(() => {
+            const signals: string[] = [];
+            const stepEls = document.querySelectorAll(
+                '[class*="step"], [class*="progress"], [class*="breadcrumb"], ' +
+                '[class*="wizard"], [class*="stepper"], [role="progressbar"], ' +
+                'ol li, nav[aria-label*="step"] *, nav[aria-label*="progress"] *',
+            );
+            const accountPatterns = [
+                /\b(create|make)\s+account\b/i,
+                /\bsign\s*(up|in)\b/i,
+                /\blog\s*in\b/i,
+                /\bregister\b/i,
+                /\baccount\s+(creation|setup|details|info)\b/i,
+                /\byour\s+account\b/i,
+            ];
+            for (const el of stepEls) {
+                const text = (el as HTMLElement).innerText?.trim() ?? '';
+                if (text.length > 200) continue;
+                for (const p of accountPatterns) {
+                    if (p.test(text)) {
+                        signals.push(`progress-account-step: ${text.substring(0, 80)}`);
+                        break;
+                    }
+                }
+            }
+            return { found: signals.length > 0, signals };
+        });
+    } catch {
+        return { found: false, signals: [] };
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 5: Calendar / date-picker widget detection
+ * ══════════════════════════════════════════════════════════════ */
+
+async function detectCalendarWidget(page: any): Promise<{
+    found: boolean;
+    signals: string[];
+}> {
+    try {
+        return await page.evaluate(() => {
+            const signals: string[] = [];
+
+            const selectors = [
+                '[class*="calendar"]:not([class*="icon"])',
+                '[class*="datepicker"]',
+                '[class*="date-picker"]',
+                '[class*="DayPicker"]',
+                '[class*="react-calendar"]',
+                '[role="grid"][aria-label*="calendar"]',
+                '[role="grid"][aria-label*="date"]',
+                'table[class*="calendar"]',
+                '.fc-daygrid',
+                '.fc-timegrid',
+                '[data-testid*="calendar"]',
+            ];
+            for (const sel of selectors) {
+                try {
+                    for (const el of document.querySelectorAll(sel)) {
+                        const rect = (el as HTMLElement).getBoundingClientRect();
+                        if (rect.width > 50 && rect.height > 50) {
+                            signals.push(`calendar-widget: ${sel}`);
+                            break;
+                        }
+                    }
+                } catch { /* invalid selector — skip */ }
+            }
+
+            /* Day-of-week headers */
+            const dayNames = new Set(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
+            let dayHdrCount = 0;
+            for (const th of document.querySelectorAll('th, [role="columnheader"]')) {
+                if (dayNames.has(
+                    ((th as HTMLElement).innerText ?? '').trim().toLowerCase().substring(0, 3),
+                )) {
+                    dayHdrCount++;
+                }
+            }
+            if (dayHdrCount >= 5) signals.push('calendar-widget: day-of-week-headers');
+
+            /* Numbered day cells inside a grid */
+            let numberedDays = 0;
+            for (const cell of document.querySelectorAll(
+                '[role="gridcell"], td[class*="day"]',
+            )) {
+                const t = ((cell as HTMLElement).innerText ?? '').trim();
+                if (/^\d{1,2}$/.test(t)) {
+                    const n = parseInt(t);
+                    if (n >= 1 && n <= 31) numberedDays++;
+                }
+            }
+            if (numberedDays >= 10) signals.push('calendar-widget: numbered-day-grid');
+
+            if (document.querySelectorAll('input[type="date"]').length > 0) {
+                signals.push('calendar-widget: input[type="date"]');
+            }
+
+            return { found: signals.length > 0, signals };
+        });
+    } catch {
+        return { found: false, signals: [] };
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 6: Confirmation-button type analysis
+ * ══════════════════════════════════════════════════════════════ */
+
+async function analyzeConfirmationButtons(page: any): Promise<{
+    isRequestStyle: boolean;
+    isConfirmStyle: boolean;
+    signals: string[];
+}> {
+    try {
+        return await page.evaluate(() => {
+            const signals: string[] = [];
+            let isRequestStyle = false;
+            let isConfirmStyle = false;
+
+            const requestPats = [
+                /request\s+(an?\s+)?appointment/i,
+                /submit\s+request/i,
+                /send\s+request/i,
+                /request\s+booking/i,
+                /inquire\s+now/i,
+                /send\s+(inquiry|message|enquiry)/i,
+                /request\s+consultation/i,
+                /submit\s+inquiry/i,
+            ];
+            const confirmPats = [
+                /confirm\s+booking/i,
+                /complete\s+booking/i,
+                /book\s+(now|appointment|this)/i,
+                /place\s+order/i,
+                /confirm\s+appointment/i,
+                /finalize\s+booking/i,
+                /pay\s+(now|&\s*book)/i,
+                /reserve\s+(now|this)/i,
+                /schedule\s+(now|this|appointment)/i,
+                /complete\s+reservation/i,
+                /add\s+to\s+cart/i,
+            ];
+
+            for (const el of document.querySelectorAll(
+                'a, button, [role="button"], input[type="submit"]',
+            )) {
+                const text =
+                    (el as HTMLElement).innerText?.trim() ||
+                    (el as HTMLInputElement).value?.trim() ||
+                    '';
+                if (!text || text.length > 100) continue;
+
+                for (const p of requestPats) {
+                    if (p.test(text)) {
+                        isRequestStyle = true;
+                        signals.push(`request-style-cta: ${text.substring(0, 60)}`);
+                        break;
+                    }
+                }
+                for (const p of confirmPats) {
+                    if (p.test(text)) {
+                        isConfirmStyle = true;
+                        signals.push(`confirm-style-cta: ${text.substring(0, 60)}`);
+                        break;
+                    }
+                }
+            }
+
+            return { isRequestStyle, isConfirmStyle, signals };
+        });
+    } catch {
+        return { isRequestStyle: false, isConfirmStyle: false, signals: [] };
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  UPGRADE 7: Enhanced modal / dialog dismissal
+ * ══════════════════════════════════════════════════════════════ */
+
+async function dismissDialogModals(page: any): Promise<void> {
+    try {
+        await page.evaluate(() => {
+            /* ── role="dialog" / aria-modal modals ── */
+            for (const dialog of document.querySelectorAll(
+                '[role="dialog"], [aria-modal="true"]',
+            )) {
+                const style = window.getComputedStyle(dialog as HTMLElement);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+                const closeSelectors = [
+                    '[aria-label="Close"]',
+                    '[aria-label="close"]',
+                    '[aria-label="Dismiss"]',
+                    '[data-dismiss="modal"]',
+                    'button[class*="close"]:not([class*="closed"])',
+                    '.modal-close',
+                ];
+                let closed = false;
+                for (const sel of closeSelectors) {
+                    try {
+                        const btn = dialog.querySelector(sel);
+                        if (btn) {
+                            (btn as HTMLElement).click();
+                            closed = true;
+                            break;
+                        }
+                    } catch { /* skip */ }
+                }
+                if (!closed) {
+                    for (const btn of dialog.querySelectorAll('button, [role="button"]')) {
+                        const t = ((btn as HTMLElement).innerText ?? '').trim();
+                        if (['×', 'X', '✕', '✖', '╳'].includes(t)) {
+                            (btn as HTMLElement).click();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            /* ── Cookie / consent banners ── */
+            const acceptPats = [
+                /^accept(\s+all)?(\s+cookies?)?$/i,
+                /^i\s+agree$/i,
+                /^got\s+it!?$/i,
+                /^ok(ay)?$/i,
+                /^accept\s*&?\s*continue$/i,
+                /^allow(\s+all)?(\s+cookies?)?$/i,
+            ];
+            for (const container of document.querySelectorAll(
+                '[class*="cookie"], [class*="consent"], [id*="cookie"], ' +
+                '[id*="consent"], [class*="gdpr"], [id*="gdpr"]',
+            )) {
+                const cs = window.getComputedStyle(container as HTMLElement);
+                if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+                for (const btn of container.querySelectorAll(
+                    'button, a[role="button"], a',
+                )) {
+                    const t = ((btn as HTMLElement).innerText ?? '').trim();
+                    if (acceptPats.some((p) => p.test(t))) {
+                        (btn as HTMLElement).click();
+                        break;
+                    }
+                }
+            }
+        });
+    } catch {
+        /* page may have navigated */
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  Post-flow enhanced-signal aggregator
+ * ══════════════════════════════════════════════════════════════ */
+
+interface EnhancedSignals {
+    calendarSignals: string[];
+    confirmationSignals: string[];
+    breadcrumbSignals: string[];
+    networkSignals: string[];
+    hasPasswordField: boolean;
+    hasCalendar: boolean;
+    isRequestStyle: boolean;
+    isConfirmStyle: boolean;
+    hasAccountStep: boolean;
+}
+
+async function collectEnhancedSignals(
+    page: any,
+    netMon: NetworkMonitor,
+): Promise<EnhancedSignals> {
+    const [calendar, confirmation, breadcrumb, password] = await Promise.all([
+        detectCalendarWidget(page),
+        analyzeConfirmationButtons(page),
+        detectAccountStepInProgress(page),
+        detectVisiblePasswordField(page),
+    ]);
+    return {
+        calendarSignals: calendar.signals,
+        confirmationSignals: confirmation.signals,
+        breadcrumbSignals: breadcrumb.signals,
+        networkSignals: netMon.toSchedulerSignals(),
+        hasPasswordField: password,
+        hasCalendar: calendar.found,
+        isRequestStyle: confirmation.isRequestStyle && !confirmation.isConfirmStyle,
+        isConfirmStyle: confirmation.isConfirmStyle,
+        hasAccountStep: breadcrumb.found,
+    };
+}
+
+/**
+ * Enrich a classification result with enhanced detection signals
+ * collected after the booking flow finishes.
+ */
+function enrichResultWithEnhancedSignals(
+    result: ClassificationResult,
+    enhanced: EnhancedSignals,
+): ClassificationResult {
+    return {
+        ...result,
+        evidence: {
+            ...result.evidence,
+            schedulerSignals: unique([
+                ...result.evidence.schedulerSignals,
+                ...enhanced.calendarSignals,
+                ...enhanced.networkSignals,
+            ]),
+            loginSignals: unique([
+                ...result.evidence.loginSignals,
+                ...(enhanced.hasPasswordField ? ['visible-password-field-detected'] : []),
+                ...enhanced.breadcrumbSignals,
+            ]),
+            bookingFlowSignals: unique([
+                ...(result.evidence.bookingFlowSignals ?? []),
+                ...enhanced.confirmationSignals,
+            ]),
+        },
+    };
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  Helper to build a forced-account-creation result
  * ══════════════════════════════════════════════════════════════ */
 
@@ -925,6 +1454,7 @@ async function advanceBookingFlow(args: {
         }
 
         await dismissCommonPopups(activePage);
+        await dismissDialogModals(activePage);
 
         snapshot = await buildSnapshot(activePage);
         recordSnapshotUrls(visitedUrls, snapshot);
@@ -946,6 +1476,24 @@ async function advanceBookingFlow(args: {
                 snapshot = guestContinue.snapshot;
                 recordSnapshotUrls(visitedUrls, snapshot);
                 continue;
+            }
+
+            /* Upgrade 3: Try guest checkout before escalating */
+            const guestClicked = await tryClickGuestCheckout(activePage, log);
+            if (guestClicked) {
+                if (isVendorMarketingPage(activePage.url())) {
+                    return {
+                        activePage,
+                        stopReason: 'vendor_marketing',
+                        snapshot,
+                        filledFields: unique(filledFields),
+                    };
+                }
+                snapshot = await buildSnapshot(activePage);
+                recordSnapshotUrls(visitedUrls, snapshot);
+                if (snapshot.dominant.state !== 'login_gate') {
+                    continue;
+                }
             }
 
             if (hasShopifyAuthNoise(visitedUrls)) {
@@ -1031,6 +1579,24 @@ async function advanceBookingFlow(args: {
                     snapshot = guestContinue.snapshot;
                     recordSnapshotUrls(visitedUrls, snapshot);
                     continue;
+                }
+
+                /* Upgrade 3: Try guest checkout after fill */
+                const guestClicked = await tryClickGuestCheckout(activePage, log);
+                if (guestClicked) {
+                    if (isVendorMarketingPage(activePage.url())) {
+                        return {
+                            activePage,
+                            stopReason: 'vendor_marketing',
+                            snapshot,
+                            filledFields: unique(filledFields),
+                        };
+                    }
+                    snapshot = await buildSnapshot(activePage);
+                    recordSnapshotUrls(visitedUrls, snapshot);
+                    if (snapshot.dominant.state !== 'login_gate') {
+                        continue;
+                    }
                 }
 
                 if (hasShopifyAuthNoise(visitedUrls)) {
@@ -1139,7 +1705,7 @@ async function advanceBookingFlow(args: {
             const entryFallback = await clickBookingEntry(
                 activePage,
                 strategy,
-                attemptedActions,
+                entryAttempted,
                 log,
             );
 
@@ -1227,9 +1793,14 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     const startedAt = Date.now();
     const strategy = getStrategy(request.retryCount ?? 0);
 
+    /* Upgrade 1 & 8: Start network monitor for vendor API + availability detection */
+    const networkMonitor = new NetworkMonitor();
+    networkMonitor.start(page);
+
     await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(900);
     await dismissCommonPopups(page);
+    await dismissDialogModals(page);
 
     const visitedUrls: string[] = [page.url()];
     await collectAndRecordIframeUrls(page, visitedUrls);
@@ -1288,6 +1859,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 filledFields: [],
             },
         };
+        networkMonitor.stop(page);
         await pushData(result);
         return;
     }
@@ -1311,6 +1883,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         await popupPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         await popupPage.waitForTimeout(1500);
         await dismissCommonPopups(popupPage);
+        await dismissDialogModals(popupPage);
     }
 
     const entryActed = entry.acted || !!popupPage;
@@ -1343,6 +1916,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot: landingSnapshot,
                 filledFields: [],
             });
+            networkMonitor.stop(page);
             await pushData(result);
             return;
         }
@@ -1361,6 +1935,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot: landingSnapshot,
                 filledFields: [],
             });
+            networkMonitor.stop(page);
             await pushData(result);
             return;
         }
@@ -1394,6 +1969,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
+            networkMonitor.stop(page);
             await pushData(result);
             return;
         }
@@ -1426,6 +2002,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
+            networkMonitor.stop(page);
             await pushData(result);
             return;
         }
@@ -1452,6 +2029,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
+        networkMonitor.stop(page);
         await maybeRetryOrPush({ request, pushData, result });
         return;
     }
@@ -1499,6 +2077,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: [],
         });
+        networkMonitor.stop(activePage);
         await pushData(result);
         return;
     }
@@ -1519,14 +2098,19 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: [],
         });
+        networkMonitor.stop(activePage);
         await pushData(result);
         return;
     }
 
     /* ══════════════════════════════════════════════
-     *  Immediate login-gate handling (with Shopify guards)
+     *  Immediate login-gate handling
+     *  (with Shopify guards + guest-checkout + password detection)
      * ══════════════════════════════════════════════ */
     if (snapshot.dominant.state === 'login_gate') {
+        let immediateLoginResolved = false;
+
+        /* Try 1: clickSafeContinue (existing) */
         const immediateGuestAttempt = await clickSafeContinue({
             page: activePage,
             snapshot,
@@ -1534,59 +2118,55 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             strategy,
             log,
         });
-
         if (immediateGuestAttempt.acted) {
             activePage = immediateGuestAttempt.page;
             snapshot = immediateGuestAttempt.snapshot;
             recordSnapshotUrls(visitedUrls, snapshot);
-        } else if (hasShopifyAuthNoise(visitedUrls)) {
-            log.info(
-                'Login-gate appears to be Shopify background auth — cleaning artifacts and re-evaluating',
-                { activeUrl: activePage.url() },
-            );
-            await cleanShopifyAuthArtifacts(activePage);
-            snapshot = await buildSnapshot(activePage);
-            recordSnapshotUrls(visitedUrls, snapshot);
+            immediateLoginResolved = snapshot.dominant.state !== 'login_gate';
+        }
 
-            if (snapshot.dominant.state === 'login_gate') {
-                if (isAmbientPlatformAuth(visitedUrls, snapshot.aggregate.loginSignals)) {
+        /* Try 2: Guest checkout (Upgrade 3) */
+        if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
+            const guestClicked = await tryClickGuestCheckout(activePage, log);
+            if (guestClicked) {
+                snapshot = await buildSnapshot(activePage);
+                recordSnapshotUrls(visitedUrls, snapshot);
+                immediateLoginResolved = snapshot.dominant.state !== 'login_gate';
+            }
+        }
+
+        /* Try 3: Shopify artifact cleanup (existing) */
+        if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
+            if (hasShopifyAuthNoise(visitedUrls)) {
+                log.info(
+                    'Login-gate appears to be Shopify background auth — cleaning artifacts and re-evaluating',
+                    { activeUrl: activePage.url() },
+                );
+                await cleanShopifyAuthArtifacts(activePage);
+                snapshot = await buildSnapshot(activePage);
+                recordSnapshotUrls(visitedUrls, snapshot);
+
+                if (snapshot.dominant.state !== 'login_gate') {
+                    immediateLoginResolved = true;
+                } else if (isAmbientPlatformAuth(visitedUrls, snapshot.aggregate.loginSignals)) {
                     log.info(
                         'Post-cleanup login_gate is only ambient platform signals — not a real gate, continuing to flow',
                         { signals: snapshot.aggregate.loginSignals },
                     );
-                } else {
-                    const result: ClassificationResult = {
-                        url: request.url,
-                        finalUrl: activePage.url(),
-                        bookingVendor: immediateVendor.name,
-                        forcedAccountCreation: true,
-                        contactFormOnlyBooking: false,
-                        needsManualReview: false,
-                        clickedText,
-                        confidence: 0.98,
-                        reason: 'Booking flow is blocked by a login or account-creation gate immediately after entry.',
-                        evidence: {
-                            visitedUrls,
-                            vendorMatch: immediateVendor.match,
-                            loginSignals: snapshot.aggregate.loginSignals,
-                            appointmentSignals: [],
-                            generalContactSignals: [],
-                            schedulerSignals: snapshot.aggregate.schedulerSignals,
-                            bookingFlowSignals: [],
-                            filledFields: [],
-                        },
-                    };
-
-                    await pushData(result);
-                    return;
+                    immediateLoginResolved = true;
                 }
+            } else if (isAmbientPlatformAuth(visitedUrls, snapshot.aggregate.loginSignals)) {
+                log.info(
+                    'Login-gate is ambient platform checkout noise — not a real gate, continuing to flow',
+                    { signals: snapshot.aggregate.loginSignals, activeUrl: activePage.url() },
+                );
+                immediateLoginResolved = true;
             }
-        } else if (isAmbientPlatformAuth(visitedUrls, snapshot.aggregate.loginSignals)) {
-            log.info(
-                'Login-gate is ambient platform checkout noise — not a real gate, continuing to flow',
-                { signals: snapshot.aggregate.loginSignals, activeUrl: activePage.url() },
-            );
-        } else {
+        }
+
+        /* All attempts exhausted — report forced account creation */
+        if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
+            const hasPassword = await detectVisiblePasswordField(activePage);
             const result: ClassificationResult = {
                 url: request.url,
                 finalUrl: activePage.url(),
@@ -1595,12 +2175,15 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 contactFormOnlyBooking: false,
                 needsManualReview: false,
                 clickedText,
-                confidence: 0.98,
+                confidence: hasPassword ? 0.99 : 0.98,
                 reason: 'Booking flow is blocked by a login or account-creation gate immediately after entry.',
                 evidence: {
                     visitedUrls,
                     vendorMatch: immediateVendor.match,
-                    loginSignals: snapshot.aggregate.loginSignals,
+                    loginSignals: [
+                        ...snapshot.aggregate.loginSignals,
+                        ...(hasPassword ? ['visible-password-field-detected'] : []),
+                    ],
                     appointmentSignals: [],
                     generalContactSignals: [],
                     schedulerSignals: snapshot.aggregate.schedulerSignals,
@@ -1609,6 +2192,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
+            networkMonitor.stop(activePage);
             await pushData(result);
             return;
         }
@@ -1630,11 +2214,24 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     /* Final iframe collection after the flow completes */
     await collectAndRecordIframeUrls(activePage, visitedUrls);
 
+    /* Upgrades 1–8: stop network monitor and collect enhanced signals */
+    networkMonitor.stop(activePage);
+    const enhanced = await collectEnhancedSignals(activePage, networkMonitor);
+
+    /**
+     * Wrap pushData so every post-flow result is automatically enriched
+     * with enhanced detection signals (calendar, network, confirmation, etc.).
+     */
+    const pushResult = async (res: ClassificationResult) => {
+        await pushData(enrichResultWithEnhancedSignals(res, enhanced));
+    };
+
     /* Final vendor resolution from all accumulated evidence */
     const bestVendor = resolveVendor(
         snapshot.vendor,
         immediateVendor,
         detectVendorFromVisitedUrls(visitedUrls),
+        networkMonitor.detectVendorFromApiHits(),
     );
 
     /* ── Vendor-marketing bail-out ── */
@@ -1660,7 +2257,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot,
                 filledFields: flow.filledFields,
             });
-            await pushData(result);
+            await pushResult(result);
             return;
         }
 
@@ -1687,7 +2284,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await maybeRetryOrPush({ request, pushData, result });
+        await maybeRetryOrPush({ request, pushData: pushResult, result });
         return;
     }
 
@@ -1726,7 +2323,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                         filledFields: flow.filledFields,
                     },
                 };
-                await pushData(result);
+                await pushResult(result);
                 return;
             }
 
@@ -1743,7 +2340,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     snapshot,
                     filledFields: flow.filledFields,
                 });
-                await pushData(result);
+                await pushResult(result);
                 return;
             }
 
@@ -1774,7 +2371,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                         filledFields: flow.filledFields,
                     },
                 };
-                await pushData(result);
+                await pushResult(result);
                 return;
             }
 
@@ -1800,7 +2397,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     filledFields: flow.filledFields,
                 },
             };
-            await maybeRetryOrPush({ request, pushData, result });
+            await maybeRetryOrPush({ request, pushData: pushResult, result });
             return;
         }
 
@@ -1812,7 +2409,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             contactFormOnlyBooking: false,
             needsManualReview: false,
             clickedText,
-            confidence: 0.96,
+            confidence: enhanced.hasPasswordField ? 0.98 : 0.96,
             reason: 'Booking flow is blocked by a login or account-creation gate.',
             evidence: {
                 visitedUrls,
@@ -1826,7 +2423,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -1858,7 +2455,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -1890,7 +2487,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -1917,7 +2514,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot,
                 filledFields: flow.filledFields,
             });
-            await pushData(result);
+            await pushResult(result);
             return;
         }
 
@@ -1936,22 +2533,33 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot,
                 filledFields: flow.filledFields,
             });
-            await pushData(result);
+            await pushResult(result);
             return;
         }
 
         const detectedSignals = gatherContactOnlySignals(snapshot, contactFormOpts(visitedUrls));
+
+        /* Upgrade 6: Confirmation-type analysis may contradict contact-form classification */
+        const schedulerContradictsContactForm =
+            enhanced.isConfirmStyle || enhanced.hasCalendar || networkMonitor.hasAvailabilityFetches();
+        const contactConfidence = schedulerContradictsContactForm
+            ? 0.55
+            : enhanced.isRequestStyle ? 0.92 : 0.88;
 
         const result: ClassificationResult = {
             url: request.url,
             finalUrl: activePage.url(),
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
-            contactFormOnlyBooking: true,
-            needsManualReview: false,
+            contactFormOnlyBooking: !schedulerContradictsContactForm,
+            needsManualReview: schedulerContradictsContactForm,
             clickedText,
-            confidence: 0.88,
-            reason: 'The booking path leads to an appointment-request style form, not a live scheduler.',
+            confidence: contactConfidence,
+            reason: schedulerContradictsContactForm
+                ? 'Flow classified as contact form, but live scheduler indicators (calendar widget, availability API, or booking CTAs) were also detected. Manual review recommended.'
+                : enhanced.isRequestStyle
+                    ? 'The booking path leads to an appointment-request form (confirmed by request-style CTA), not a live scheduler.'
+                    : 'The booking path leads to an appointment-request style form, not a live scheduler.',
             evidence: {
                 visitedUrls,
                 vendorMatch: bestVendor.match,
@@ -1967,7 +2575,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -1975,7 +2583,9 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
     const strongSchedulerEvidence =
         hasStrongLiveSchedulerEvidence(snapshot.aggregate.schedulerSignals) ||
-        visitedUrlsShowLiveScheduler(visitedUrls);
+        visitedUrlsShowLiveScheduler(visitedUrls) ||
+        networkMonitor.hasAvailabilityFetches() ||
+        enhanced.hasCalendar;
 
     const vendorRequiresAccount = vendorRequiresAccountForOnlineBooking({
         vendor: bestVendor,
@@ -1997,7 +2607,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: flow.filledFields,
         });
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -2032,9 +2642,9 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         };
 
         if (result.needsManualReview) {
-            await maybeRetryOrPush({ request, pushData, result });
+            await maybeRetryOrPush({ request, pushData: pushResult, result });
         } else {
-            await pushData(result);
+            await pushResult(result);
         }
         return;
     }
@@ -2061,7 +2671,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: flow.filledFields,
         });
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -2080,7 +2690,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: flow.filledFields,
         });
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -2113,7 +2723,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 filledFields: flow.filledFields,
             },
         };
-        await pushData(result);
+        await pushResult(result);
         return;
     }
 
@@ -2144,23 +2754,36 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 filledFields: flow.filledFields,
             },
         };
-        await pushData(result);
+        await pushResult(result);
         return;
     }
+
+    /* Upgrade 5/6/8: Enhanced signals may resolve the ambiguity */
+    const enhancedSchedulerEvidence =
+        enhanced.hasCalendar || networkMonitor.hasAvailabilityFetches() || enhanced.isConfirmStyle;
+    const enhancedContactEvidence =
+        enhanced.isRequestStyle && !enhanced.isConfirmStyle && !enhanced.hasCalendar;
 
     const result: ClassificationResult = {
         url: request.url,
         finalUrl: activePage.url(),
         bookingVendor: bestVendor.name,
         forcedAccountCreation: false,
-        contactFormOnlyBooking: false,
-        needsManualReview: true,
+        contactFormOnlyBooking: enhancedContactEvidence,
+        needsManualReview: !enhancedSchedulerEvidence && !enhancedContactEvidence,
         clickedText,
-        confidence: 0.45,
-        reason:
-            flow.stopReason === 'stalled' || flow.stopReason === 'maxSteps'
-                ? 'Booking path was found, but it stalled before proving full booking completion without a login popup or account gate.'
-                : 'Booking path was found, but the booking outcome is still ambiguous.',
+        confidence: enhancedSchedulerEvidence
+            ? 0.72
+            : enhancedContactEvidence
+                ? 0.75
+                : 0.45,
+        reason: enhancedSchedulerEvidence
+            ? 'Booking flow stalled, but calendar widgets and/or availability API calls confirm a live scheduler is present. No forced account-creation gate was encountered.'
+            : enhancedContactEvidence
+                ? 'Booking flow stalled. Request-style CTAs and absence of scheduler widgets indicate a contact/request form rather than a live scheduler.'
+                : flow.stopReason === 'stalled' || flow.stopReason === 'maxSteps'
+                    ? 'Booking path was found, but it stalled before proving full booking completion without a login popup or account gate.'
+                    : 'Booking path was found, but the booking outcome is still ambiguous.',
         evidence: {
             visitedUrls,
             vendorMatch: bestVendor.match,
@@ -2173,6 +2796,5 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         },
     };
 
-    await maybeRetryOrPush({ request, pushData, result });
+    await maybeRetryOrPush({ request, pushData: pushResult, result });
 });
-
