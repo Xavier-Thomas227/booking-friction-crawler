@@ -22,6 +22,36 @@ import {
     withPrefix,
 } from './booking-state.js';
 
+import { NetworkMonitor, type NetworkSignals } from './network-monitor.js';
+
+/* NetworkMonitor adapter helpers */
+function vendorFromNetworkSignals(
+    signals: NetworkSignals,
+): { name: string; match: string } | null {
+    if (!signals.detectedVendor) return null;
+    const firstUrl = signals.matchedUrls[0];
+    return {
+        name: signals.detectedVendor,
+        match: firstUrl
+            ? `api-request: ${firstUrl.substring(0, 120)}`
+            : 'network-api-detected',
+    };
+}
+
+function networkSignalsToSchedulerStrings(signals: NetworkSignals): string[] {
+    const out: string[] = [];
+    if (signals.hasAvailabilityApi) {
+        out.push('network: availability-api-detected');
+        for (const url of signals.matchedUrls.slice(0, 3)) {
+            out.push(`network-availability: ${url.substring(0, 120)}`);
+        }
+    }
+    if (signals.detectedVendor) {
+        out.push(`network: vendor-api-detected (${signals.detectedVendor})`);
+    }
+    return out;
+}
+
 import type {
     ActionAttempt,
     BookingSnapshot,
@@ -49,10 +79,6 @@ const ENTRY_FALLBACK_STATES = new Set([
 
 /* ══════════════════════════════════════════════════════════════
  *  Vendor marketing / homepage detection
- *
- *  CHANGED: added Zenoti corporate-site guard.  Only matches
- *  the vendor's own domain (zenoti.com), NOT business
- *  subdomains like <slug>.zenoti.com.
  * ══════════════════════════════════════════════════════════════ */
 
 const VENDOR_MARKETING_PATTERNS: { host: RegExp; pathIsMarketing: (path: string) => boolean }[] = [
@@ -171,7 +197,6 @@ const VENDOR_MARKETING_PATTERNS: { host: RegExp; pathIsMarketing: (path: string)
             );
         },
     },
-    /* NEW ── Zenoti corporate site */
     {
         host: /^(www\.)?zenoti\.com$/i,
         pathIsMarketing: (path) => {
@@ -205,10 +230,6 @@ function isVendorMarketingPage(url: string): boolean {
 
 /* ══════════════════════════════════════════════════════════════
  *  Vendor-policy helpers
- *
- *  CHANGED: added /zenoti/i to the gated-vendor list.
- *  Zenoti's consumer-facing webstore always presents a
- *  login / create-account modal before the service menu.
  * ══════════════════════════════════════════════════════════════ */
 
 function asStrings(value: string | string[] | undefined | null): string[] {
@@ -220,7 +241,7 @@ const ACCOUNT_GATED_VENDOR_PATTERNS: RegExp[] = [
     /vagaro/i,
     /booker/i,
     /mindbody/i,
-    /zenoti/i,          /* ← NEW */
+    /zenoti/i,
 ];
 
 function vendorRequiresAccountForOnlineBooking({
@@ -254,7 +275,7 @@ function vendorRequiresAccountForOnlineBooking({
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  NEW — Fallback vendor detection from visited / iframe URLs
+ *  Fallback vendor detection from visited / iframe URLs
  * ══════════════════════════════════════════════════════════════ */
 
 const VENDOR_URL_DETECTION_PATTERNS: { pattern: RegExp; name: string }[] = [
@@ -289,10 +310,6 @@ function detectVendorFromVisitedUrls(urls: string[]): { name: string; match: str
     return null;
 }
 
-/**
- * Merge multiple vendor-detection results, returning the first
- * one that carries an actual name.
- */
 function resolveVendor(
     ...candidates: Array<{ name?: string | null; match?: string | null } | null | undefined>
 ): { name: string | null; match: string | null } {
@@ -303,7 +320,7 @@ function resolveVendor(
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  NEW — Known vendor login-gate URL patterns
+ *  Known vendor login-gate URL patterns
  * ══════════════════════════════════════════════════════════════ */
 
 const VENDOR_LOGIN_GATE_URL_PATTERNS: RegExp[] = [
@@ -399,10 +416,6 @@ async function cleanShopifyAuthArtifacts(page: any): Promise<void> {
     }
 }
 
-/* ──────────────────────────────────────────────
- *  Combined ambient-platform-auth detection
- * ────────────────────────────────────────────── */
-
 function isAmbientPlatformAuth(
     visitedUrls: string[],
     loginSignals: string[],
@@ -415,49 +428,32 @@ function isAmbientPlatformAuth(
  * ══════════════════════════════════════════════════════════════ */
 
 const LIVE_SCHEDULER_URL_PATTERNS: RegExp[] = [
-    /* Booker / Mindbody */
     /go\.booker\.com\/location\/[^/]+\/service-menu\b/i,
     /go\.booker\.com\/location\/[^/]+\/detail-summary\b/i,
     /go\.booker\.com\/location\/[^/]+\/date-time\b/i,
     /go\.booker\.com\/location\/[^/]+\/staff\b/i,
     /clients\.mindbodyonline\.com/i,
     /widgets\.mindbodyonline\.com/i,
-    /* Acuity Scheduling (Squarespace) */
     /acuityscheduling\.com\/schedule/i,
     /app\.acuityscheduling\.com/i,
     /embed\.acuityscheduling\.com/i,
-    /* Calendly */
     /calendly\.com\/[^/?]+\/[^/?]+/i,
-    /* Vagaro (business booking page, not marketing root) */
     /www\.vagaro\.com\/[^/]+\/book-now/i,
-    /* Boulevard */
     /dashboard\.boulevard\.io\/booking\//i,
     /booking\.joinblvd\.com/i,
-    /* GlossGenius */
     /book\.glossgenius\.com/i,
-    /* Fresha */
     /fresha\.com\/book-now\//i,
     /widget\.fresha\.com/i,
-    /* Mangomint */
     /book\.mangomint\.com/i,
-    /* Phorest */
     /phorest\.com\/book\//i,
-    /* Zenoti — webstore is a real scheduler, just login-gated */
     /zenoti\.com\/(webstoreNew|webstore)\b/i,
-    /* Booksy */
     /booksy\.com\/en-[a-z]{2}\/[^/]+\/[^/]+\/\d+/i,
-    /* Setmore */
     /my\.setmore\.com/i,
-    /* SimplyBook.me */
     /simplybook\.me\/v2/i,
-    /* Appointy */
     /book\.appointy\.com/i,
-    /* Timely */
     /book\.gettimely\.com/i,
-    /* Square Appointments */
     /squareup\.com\/appointments\/buyer/i,
     /square\.site\/book\//i,
-    /* GoHighLevel / LeadConnector */
     /leadconnectorhq\.com\/widget\/booking\//i,
 ];
 
@@ -472,32 +468,20 @@ function visitedUrlsShowLiveScheduler(visitedUrls: string[]): boolean {
  * ══════════════════════════════════════════════════════════════ */
 
 const CONTACT_FORM_VENDOR_URL_PATTERNS: RegExp[] = [
-    /* JotForm */
     /form\.jotform\.com/i,
     /submit\.jotform\.com/i,
     /jotform\.com\/form\//i,
-    /* Typeform */
     /typeform\.com\/to\//i,
-    /* Wufoo */
     /\.wufoo\.com\/forms\//i,
-    /* Google Forms */
     /docs\.google\.com\/forms/i,
     /forms\.gle\//i,
-    /* Cognito Forms */
     /cognitoforms\.com\//i,
-    /* Paperform */
     /paperform\.co\//i,
-    /* Formstack */
     /formstack\.com\/forms\//i,
-    /* Microsoft Forms */
     /forms\.office\.com/i,
-    /* Airtable shared forms */
     /airtable\.com\/shr/i,
-    /* Tally */
     /tally\.so\//i,
-    /* 123FormBuilder */
     /123formbuilder\.com\/form/i,
-    /* GoHighLevel / LeadConnector — lead-capture forms */
     /leadconnectorhq\.com\/widget\/form\//i,
 ];
 
@@ -614,7 +598,7 @@ async function detectHealcodeWidget(page: any): Promise<boolean> {
 }
 
 /* ──────────────────────────────────────────────
- *  Contact-form-only detection (enhanced)
+ *  Contact-form-only detection
  * ────────────────────────────────────────────── */
 
 interface ContactFormOpts {
@@ -763,117 +747,7 @@ function contactFormOpts(visitedUrls: string[]): ContactFormOpts {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 1 & 8: Network request interception
- *                 & availability-fetch detection
- * ══════════════════════════════════════════════════════════════ */
-
-const VENDOR_API_URL_PATTERNS: RegExp[] = [
-    /zenoti\.com\/api\//i,
-    /vagaro\.com\/(api|Ajax)\//i,
-    /mindbodyonline\.com\/api\//i,
-    /go\.booker\.com\/api\//i,
-    /fresha\.com\/api\//i,
-    /glossgenius\.com\/api\//i,
-    /joinblvd\.com\/api\//i,
-    /boulevard\.io\/api\//i,
-    /mangomint\.com\/api\//i,
-    /booksy\.com\/api\//i,
-    /acuityscheduling\.com\/api\//i,
-    /calendly\.com\/api\//i,
-    /squareup\.com\/api\//i,
-    /phorest\.com\/api\//i,
-    /gettimely\.com\/api\//i,
-    /setmore\.com\/api\//i,
-    /simplybook\.me\/.*api/i,
-    /appointy\.com\/api\//i,
-    /leadconnectorhq\.com\/.*api/i,
-];
-
-const AVAILABILITY_FETCH_PATTERNS: RegExp[] = [
-    /\/slots\b/i,
-    /\/time.?slots\b/i,
-    /\/availabilit(y|ies)\b/i,
-    /\/available.?times?\b/i,
-    /\/available.?dates?\b/i,
-    /\/openings?\b/i,
-    /\/schedule\/available/i,
-    /\/get.?available/i,
-    /\/appointments?\/available/i,
-    /\/free.?slots/i,
-    /\/calendar.?slots/i,
-    /\/booking.?slots/i,
-    /\/open.?slots/i,
-];
-
-class NetworkMonitor {
-    vendorApiHits: string[] = [];
-    availabilityFetches: string[] = [];
-    private _handler: ((req: any) => void) | null = null;
-
-    start(page: any): void {
-        this._handler = (req: any) => {
-            try {
-                const url: string = req.url();
-                for (const pattern of VENDOR_API_URL_PATTERNS) {
-                    if (pattern.test(url)) {
-                        this.vendorApiHits.push(url);
-                        break;
-                    }
-                }
-                for (const pattern of AVAILABILITY_FETCH_PATTERNS) {
-                    if (pattern.test(url)) {
-                        this.availabilityFetches.push(url);
-                        break;
-                    }
-                }
-            } catch { /* request may already be disposed */ }
-        };
-        page.on('request', this._handler);
-    }
-
-    stop(page: any): void {
-        if (this._handler) {
-            try { page.off('request', this._handler); } catch { /* ignore */ }
-            this._handler = null;
-        }
-    }
-
-    hasAvailabilityFetches(): boolean {
-        return this.availabilityFetches.length > 0;
-    }
-
-    hasVendorApiHits(): boolean {
-        return this.vendorApiHits.length > 0;
-    }
-
-    detectVendorFromApiHits(): { name: string; match: string } | null {
-        for (const url of this.vendorApiHits) {
-            for (const { pattern, name } of VENDOR_URL_DETECTION_PATTERNS) {
-                if (pattern.test(url)) {
-                    return { name, match: `api-request: ${url.substring(0, 120)}` };
-                }
-            }
-        }
-        return null;
-    }
-
-    toSchedulerSignals(): string[] {
-        const signals: string[] = [];
-        if (this.availabilityFetches.length > 0) {
-            signals.push('network: availability-api-detected');
-            for (const url of this.availabilityFetches.slice(0, 3)) {
-                signals.push(`network-availability: ${url.substring(0, 120)}`);
-            }
-        }
-        if (this.vendorApiHits.length > 0) {
-            signals.push('network: vendor-api-detected');
-        }
-        return signals;
-    }
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  UPGRADE 2: Visible password-field detection
+ *  Visible password-field detection
  * ══════════════════════════════════════════════════════════════ */
 
 async function detectVisiblePasswordField(page: any): Promise<boolean> {
@@ -901,7 +775,7 @@ async function detectVisiblePasswordField(page: any): Promise<boolean> {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 3: Guest-checkout detection & click
+ *  Guest-checkout detection & click
  * ══════════════════════════════════════════════════════════════ */
 
 const GUEST_CHECKOUT_PATTERNS: RegExp[] = [
@@ -963,7 +837,7 @@ async function tryClickGuestCheckout(page: any, log: any): Promise<boolean> {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 4: Breadcrumb / progress-step account detection
+ *  Breadcrumb / progress-step account detection
  * ══════════════════════════════════════════════════════════════ */
 
 async function detectAccountStepInProgress(page: any): Promise<{
@@ -1004,7 +878,7 @@ async function detectAccountStepInProgress(page: any): Promise<{
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 5: Calendar / date-picker widget detection
+ *  Calendar / date-picker widget detection
  * ══════════════════════════════════════════════════════════════ */
 
 async function detectCalendarWidget(page: any): Promise<{
@@ -1040,7 +914,6 @@ async function detectCalendarWidget(page: any): Promise<{
                 } catch { /* invalid selector — skip */ }
             }
 
-            /* Day-of-week headers */
             const dayNames = new Set(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
             let dayHdrCount = 0;
             for (const th of document.querySelectorAll('th, [role="columnheader"]')) {
@@ -1052,7 +925,6 @@ async function detectCalendarWidget(page: any): Promise<{
             }
             if (dayHdrCount >= 5) signals.push('calendar-widget: day-of-week-headers');
 
-            /* Numbered day cells inside a grid */
             let numberedDays = 0;
             for (const cell of document.querySelectorAll(
                 '[role="gridcell"], td[class*="day"]',
@@ -1077,7 +949,7 @@ async function detectCalendarWidget(page: any): Promise<{
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 6: Confirmation-button type analysis
+ *  Confirmation-button type analysis
  * ══════════════════════════════════════════════════════════════ */
 
 async function analyzeConfirmationButtons(page: any): Promise<{
@@ -1148,13 +1020,12 @@ async function analyzeConfirmationButtons(page: any): Promise<{
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  UPGRADE 7: Enhanced modal / dialog dismissal
+ *  Enhanced modal / dialog dismissal
  * ══════════════════════════════════════════════════════════════ */
 
 async function dismissDialogModals(page: any): Promise<void> {
     try {
         await page.evaluate(() => {
-            /* ── role="dialog" / aria-modal modals ── */
             for (const dialog of document.querySelectorAll(
                 '[role="dialog"], [aria-modal="true"]',
             )) {
@@ -1191,7 +1062,6 @@ async function dismissDialogModals(page: any): Promise<void> {
                 }
             }
 
-            /* ── Cookie / consent banners ── */
             const acceptPats = [
                 /^accept(\s+all)?(\s+cookies?)?$/i,
                 /^i\s+agree$/i,
@@ -1240,7 +1110,7 @@ interface EnhancedSignals {
 
 async function collectEnhancedSignals(
     page: any,
-    netMon: NetworkMonitor,
+    networkSignals: NetworkSignals,
 ): Promise<EnhancedSignals> {
     const [calendar, confirmation, breadcrumb, password] = await Promise.all([
         detectCalendarWidget(page),
@@ -1252,7 +1122,7 @@ async function collectEnhancedSignals(
         calendarSignals: calendar.signals,
         confirmationSignals: confirmation.signals,
         breadcrumbSignals: breadcrumb.signals,
-        networkSignals: netMon.toSchedulerSignals(),
+        networkSignals: networkSignalsToSchedulerStrings(networkSignals),
         hasPasswordField: password,
         hasCalendar: calendar.found,
         isRequestStyle: confirmation.isRequestStyle && !confirmation.isConfirmStyle,
@@ -1261,10 +1131,6 @@ async function collectEnhancedSignals(
     };
 }
 
-/**
- * Enrich a classification result with enhanced detection signals
- * collected after the booking flow finishes.
- */
 function enrichResultWithEnhancedSignals(
     result: ClassificationResult,
     enhanced: EnhancedSignals,
@@ -1441,7 +1307,6 @@ async function advanceBookingFlow(args: {
             };
         }
 
-        /* ── Vendor-marketing-page guard ── */
         const currentUrl = activePage.url();
         if (isVendorMarketingPage(currentUrl)) {
             log.warning('Landed on vendor marketing page — stopping flow', { currentUrl });
@@ -1460,8 +1325,6 @@ async function advanceBookingFlow(args: {
         recordSnapshotUrls(visitedUrls, snapshot);
         await collectAndRecordIframeUrls(activePage, visitedUrls);
 
-        /* ── Terminal states: stop immediately ── */
-
         if (snapshot.dominant.state === 'login_gate' && !platformAmbientConfirmed) {
             const guestContinue = await clickSafeContinue({
                 page: activePage,
@@ -1478,7 +1341,6 @@ async function advanceBookingFlow(args: {
                 continue;
             }
 
-            /* Upgrade 3: Try guest checkout before escalating */
             const guestClicked = await tryClickGuestCheckout(activePage, log);
             if (guestClicked) {
                 if (isVendorMarketingPage(activePage.url())) {
@@ -1556,8 +1418,6 @@ async function advanceBookingFlow(args: {
             };
         }
 
-        /* ── Non-terminal states: try to advance ── */
-
         if (snapshot.dominant.state !== 'contact_form') {
             const newlyFilled = await fillLowRiskFields(snapshot.dominant.surface.root);
             filledFields.push(...newlyFilled);
@@ -1581,7 +1441,6 @@ async function advanceBookingFlow(args: {
                     continue;
                 }
 
-                /* Upgrade 3: Try guest checkout after fill */
                 const guestClicked = await tryClickGuestCheckout(activePage, log);
                 if (guestClicked) {
                     if (isVendorMarketingPage(activePage.url())) {
@@ -1660,8 +1519,6 @@ async function advanceBookingFlow(args: {
             }
         }
 
-        /* ── Try scheduler-specific actions first ── */
-
         const action = await tryAdvanceBookingFlow({
             page: activePage,
             snapshot,
@@ -1690,8 +1547,6 @@ async function advanceBookingFlow(args: {
             recordSnapshotUrls(visitedUrls, snapshot);
             continue;
         }
-
-        /* ── Fallback: try clickBookingEntry for intermediate pages ── */
 
         const fallbackEligible =
             ENTRY_FALLBACK_STATES.has(snapshot.dominant.state) ||
@@ -1752,8 +1607,6 @@ async function advanceBookingFlow(args: {
             }
         }
 
-        /* Nothing worked — report final state. */
-
         return {
             activePage,
             stopReason: snapshot.dominant.state === 'contact_form' ? 'contact_form' : 'stalled',
@@ -1793,9 +1646,9 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     const startedAt = Date.now();
     const strategy = getStrategy(request.retryCount ?? 0);
 
-    /* Upgrade 1 & 8: Start network monitor for vendor API + availability detection */
-    const networkMonitor = new NetworkMonitor();
-    networkMonitor.start(page);
+    /* Start network monitor for vendor API + availability detection */
+    const networkMonitor = new NetworkMonitor(page);
+    networkMonitor.start();
 
     await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(900);
@@ -1815,7 +1668,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
     let firstVendor = await detectVendor(page);
 
-    /* ── Healcode / Mindbody widget fallback detection ── */
     if (!firstVendor.name) {
         const hasHealcode = await detectHealcodeWidget(page);
         if (hasHealcode) {
@@ -1824,7 +1676,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         }
     }
 
-    /* URL-based vendor fallback */
     if (!firstVendor.name) {
         const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
         if (urlVendor) {
@@ -1833,9 +1684,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         }
     }
 
-    /* ══════════════════════════════════════════════
-     *  EARLY EXIT 1: account-gated vendor detected on homepage
-     * ══════════════════════════════════════════════ */
+    /* EARLY EXIT 1: account-gated vendor detected on homepage */
     if (vendorRequiresAccountForOnlineBooking({ vendor: firstVendor, snapshot: { vendor: firstVendor }, visitedUrls })) {
         const vendorLabel = firstVendor.name || 'a detected vendor';
         const result: ClassificationResult = {
@@ -1859,19 +1708,23 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 filledFields: [],
             },
         };
-        networkMonitor.stop(page);
+        networkMonitor.stop();
         await pushData(result);
         return;
     }
 
     const entryAttempted = new Set<string>();
 
-    /* ── Listen for popups ── */
     let popupPage: any = null;
     const onNewPage = (p: any) => { popupPage = p; };
     page.context().on('page', onNewPage);
 
-    const entry = await clickBookingEntry(page, strategy, entryAttempted, log);
+    const entry = await clickBookingEntry(
+        page,
+        strategy,
+        entryAttempted,
+        log,
+    );
 
     await page.waitForTimeout(2000);
     page.context().off('page', onNewPage);
@@ -1916,7 +1769,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot: landingSnapshot,
                 filledFields: [],
             });
-            networkMonitor.stop(page);
+            networkMonitor.stop();
             await pushData(result);
             return;
         }
@@ -1935,12 +1788,11 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 snapshot: landingSnapshot,
                 filledFields: [],
             });
-            networkMonitor.stop(page);
+            networkMonitor.stop();
             await pushData(result);
             return;
         }
 
-        /* ── Before flagging manual review, check for contact-form-only site ── */
         if (!effectiveVendor.name && isContactFormOnlySite(landingSnapshot, contactFormOpts(visitedUrls))) {
             const detectedSignals = gatherContactOnlySignals(landingSnapshot, contactFormOpts(visitedUrls));
 
@@ -1969,7 +1821,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
-            networkMonitor.stop(page);
+            networkMonitor.stop();
             await pushData(result);
             return;
         }
@@ -2002,7 +1854,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
-            networkMonitor.stop(page);
+            networkMonitor.stop();
             await pushData(result);
             return;
         }
@@ -2029,7 +1881,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        networkMonitor.stop(page);
+        networkMonitor.stop();
         await maybeRetryOrPush({ request, pushData, result });
         return;
     }
@@ -2052,7 +1904,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         detectVendorFromVisitedUrls(visitedUrls),
     );
 
-    /* ── Healcode fallback after entry click ── */
     if (!immediateVendor.name) {
         const hasHealcode = await detectHealcodeWidget(activePage);
         if (hasHealcode) {
@@ -2061,9 +1912,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         }
     }
 
-    /* ══════════════════════════════════════════════
-     *  EARLY EXIT 2: account-gated vendor detected after entry click
-     * ══════════════════════════════════════════════ */
+    /* EARLY EXIT 2: account-gated vendor detected after entry click */
     if (vendorRequiresAccountForOnlineBooking({ vendor: immediateVendor, snapshot, visitedUrls })) {
         const vendorLabel = immediateVendor.name || 'a detected vendor';
         const result = buildGatedVendorResult({
@@ -2077,12 +1926,11 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: [],
         });
-        networkMonitor.stop(activePage);
+        networkMonitor.stop();
         await pushData(result);
         return;
     }
 
-    /* URL-based login-gate check after entry click */
     if (visitedUrlsShowVendorLoginGate(visitedUrls)) {
         const urlVendor = detectVendorFromVisitedUrls(visitedUrls);
         const effectiveVendor = resolveVendor(urlVendor, immediateVendor);
@@ -2098,19 +1946,15 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             snapshot,
             filledFields: [],
         });
-        networkMonitor.stop(activePage);
+        networkMonitor.stop();
         await pushData(result);
         return;
     }
 
-    /* ══════════════════════════════════════════════
-     *  Immediate login-gate handling
-     *  (with Shopify guards + guest-checkout + password detection)
-     * ══════════════════════════════════════════════ */
+    /* Immediate login-gate handling */
     if (snapshot.dominant.state === 'login_gate') {
         let immediateLoginResolved = false;
 
-        /* Try 1: clickSafeContinue (existing) */
         const immediateGuestAttempt = await clickSafeContinue({
             page: activePage,
             snapshot,
@@ -2125,7 +1969,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             immediateLoginResolved = snapshot.dominant.state !== 'login_gate';
         }
 
-        /* Try 2: Guest checkout (Upgrade 3) */
         if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
             const guestClicked = await tryClickGuestCheckout(activePage, log);
             if (guestClicked) {
@@ -2135,7 +1978,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             }
         }
 
-        /* Try 3: Shopify artifact cleanup (existing) */
         if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
             if (hasShopifyAuthNoise(visitedUrls)) {
                 log.info(
@@ -2164,7 +2006,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             }
         }
 
-        /* All attempts exhausted — report forced account creation */
         if (!immediateLoginResolved && snapshot.dominant.state === 'login_gate') {
             const hasPassword = await detectVisiblePasswordField(activePage);
             const result: ClassificationResult = {
@@ -2192,7 +2033,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 },
             };
 
-            networkMonitor.stop(activePage);
+            networkMonitor.stop();
             await pushData(result);
             return;
         }
@@ -2211,27 +2052,21 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     activePage = flow.activePage;
     snapshot = flow.snapshot;
 
-    /* Final iframe collection after the flow completes */
     await collectAndRecordIframeUrls(activePage, visitedUrls);
 
-    /* Upgrades 1–8: stop network monitor and collect enhanced signals */
-    networkMonitor.stop(activePage);
-    const enhanced = await collectEnhancedSignals(activePage, networkMonitor);
+    networkMonitor.stop();
+    const networkSignals = networkMonitor.classify();
+    const enhanced = await collectEnhancedSignals(activePage, networkSignals);
 
-    /**
-     * Wrap pushData so every post-flow result is automatically enriched
-     * with enhanced detection signals (calendar, network, confirmation, etc.).
-     */
     const pushResult = async (res: ClassificationResult) => {
         await pushData(enrichResultWithEnhancedSignals(res, enhanced));
     };
 
-    /* Final vendor resolution from all accumulated evidence */
     const bestVendor = resolveVendor(
         snapshot.vendor,
         immediateVendor,
         detectVendorFromVisitedUrls(visitedUrls),
-        networkMonitor.detectVendorFromApiHits(),
+        vendorFromNetworkSignals(networkSignals),
     );
 
     /* ── Vendor-marketing bail-out ── */
@@ -2539,9 +2374,8 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
 
         const detectedSignals = gatherContactOnlySignals(snapshot, contactFormOpts(visitedUrls));
 
-        /* Upgrade 6: Confirmation-type analysis may contradict contact-form classification */
         const schedulerContradictsContactForm =
-            enhanced.isConfirmStyle || enhanced.hasCalendar || networkMonitor.hasAvailabilityFetches();
+            enhanced.isConfirmStyle || enhanced.hasCalendar || networkSignals.hasAvailabilityApi;
         const contactConfidence = schedulerContradictsContactForm
             ? 0.55
             : enhanced.isRequestStyle ? 0.92 : 0.88;
@@ -2584,7 +2418,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
     const strongSchedulerEvidence =
         hasStrongLiveSchedulerEvidence(snapshot.aggregate.schedulerSignals) ||
         visitedUrlsShowLiveScheduler(visitedUrls) ||
-        networkMonitor.hasAvailabilityFetches() ||
+        networkSignals.hasAvailabilityApi ||
         enhanced.hasCalendar;
 
     const vendorRequiresAccount = vendorRequiresAccountForOnlineBooking({
@@ -2694,8 +2528,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         return;
     }
 
-    /* Stalled with no scheduler — check for contact-form-only site */
-
     if (!bestVendor.name && isContactFormOnlySite(snapshot, contactFormOpts(visitedUrls))) {
         const detectedSignals = gatherContactOnlySignals(snapshot, contactFormOpts(visitedUrls));
         const result: ClassificationResult = {
@@ -2758,9 +2590,8 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         return;
     }
 
-    /* Upgrade 5/6/8: Enhanced signals may resolve the ambiguity */
     const enhancedSchedulerEvidence =
-        enhanced.hasCalendar || networkMonitor.hasAvailabilityFetches() || enhanced.isConfirmStyle;
+        enhanced.hasCalendar || networkSignals.hasAvailabilityApi || enhanced.isConfirmStyle;
     const enhancedContactEvidence =
         enhanced.isRequestStyle && !enhanced.isConfirmStyle && !enhanced.hasCalendar;
 
