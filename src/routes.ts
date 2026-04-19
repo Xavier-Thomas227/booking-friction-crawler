@@ -1178,7 +1178,6 @@ function buildGatedVendorResult(args: {
         bookingVendor: args.vendor.name ?? null,
         forcedAccountCreation: true,
         contactFormOnlyBooking: false,
-        needsManualReview: false,
         clickedText: args.clickedText,
         confidence: args.confidence,
         reason: args.reason,
@@ -1623,20 +1622,6 @@ async function advanceBookingFlow(args: {
     };
 }
 
-async function maybeRetryOrPush(args: {
-    request: any;
-    pushData: any;
-    result: ClassificationResult;
-}): Promise<void> {
-    const { request, pushData, result } = args;
-    const retryCount = request.retryCount ?? 0;
-
-    if (result.needsManualReview && retryCount < MAX_RETRY_ESCALATION) {
-        throw new Error(`Ambiguous booking flow; escalating retry. Reason: ${result.reason}`);
-    }
-
-    await pushData(result);
-}
 
 /* ══════════════════════════════════════════════════════════════
  *  Main request handler
@@ -1693,7 +1678,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: firstVendor.name,
             forcedAccountCreation: true,
             contactFormOnlyBooking: false,
-            needsManualReview: false,
             clickedText: null,
             confidence: 0.94,
             reason: `Detected ${vendorLabel} on the homepage. ${vendorLabel} requires customer sign-in to complete online booking (platform-level policy).`,
@@ -1802,7 +1786,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 bookingVendor: effectiveVendor.name,
                 forcedAccountCreation: false,
                 contactFormOnlyBooking: true,
-                needsManualReview: false,
                 clickedText: null,
                 confidence: 0.82,
                 reason: 'No online scheduling system was found. The site relies on phone, contact form, or email for booking.',
@@ -1835,7 +1818,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 bookingVendor: effectiveVendor.name,
                 forcedAccountCreation: false,
                 contactFormOnlyBooking: true,
-                needsManualReview: false,
                 clickedText: null,
                 confidence: 0.75,
                 reason: 'No booking entry was found. The site embeds a third-party form (not a live scheduler) for collecting client information.',
@@ -1865,7 +1847,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: effectiveVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: false,
-            needsManualReview: true,
             clickedText: null,
             confidence: 0.35,
             reason: 'No clear booking entry was found.',
@@ -1882,7 +1863,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         };
 
         networkMonitor.stop();
-        await maybeRetryOrPush({ request, pushData, result });
+        await pushData(result);
         return;
     }
 
@@ -2014,7 +1995,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 bookingVendor: immediateVendor.name,
                 forcedAccountCreation: true,
                 contactFormOnlyBooking: false,
-                needsManualReview: false,
                 clickedText,
                 confidence: hasPassword ? 0.99 : 0.98,
                 reason: 'Booking flow is blocked by a login or account-creation gate immediately after entry.',
@@ -2102,7 +2082,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: false,
-            needsManualReview: true,
             clickedText,
             confidence: 0.40,
             reason:
@@ -2119,7 +2098,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        await maybeRetryOrPush({ request, pushData: pushResult, result });
+        await pushResult(result);
         return;
     }
 
@@ -2139,7 +2118,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     bookingVendor: bestVendor.name,
                     forcedAccountCreation: false,
                     contactFormOnlyBooking: false,
-                    needsManualReview: false,
                     clickedText,
                     confidence: 0.85,
                     reason:
@@ -2187,7 +2165,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     bookingVendor: bestVendor.name,
                     forcedAccountCreation: false,
                     contactFormOnlyBooking: true,
-                    needsManualReview: false,
                     clickedText,
                     confidence: 0.80,
                     reason:
@@ -2216,7 +2193,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                 bookingVendor: bestVendor.name,
                 forcedAccountCreation: false,
                 contactFormOnlyBooking: false,
-                needsManualReview: true,
                 clickedText,
                 confidence: 0.45,
                 reason:
@@ -2232,7 +2208,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
                     filledFields: flow.filledFields,
                 },
             };
-            await maybeRetryOrPush({ request, pushData: pushResult, result });
+            await pushResult(result);
             return;
         }
 
@@ -2242,7 +2218,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: true,
             contactFormOnlyBooking: false,
-            needsManualReview: false,
             clickedText,
             confidence: enhanced.hasPasswordField ? 0.98 : 0.96,
             reason: 'Booking flow is blocked by a login or account-creation gate.',
@@ -2271,7 +2246,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: false,
-            needsManualReview: false,
             clickedText,
             confidence: 0.9,
             reason: 'Was able to continue booking to the payment step without hitting a forced login or account-creation gate.',
@@ -2303,7 +2277,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: false,
-            needsManualReview: false,
             clickedText,
             confidence: 0.88,
             reason: 'Was able to reach the final review or confirmation step without hitting a forced login or account-creation gate.',
@@ -2386,7 +2359,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: !schedulerContradictsContactForm,
-            needsManualReview: schedulerContradictsContactForm,
             clickedText,
             confidence: contactConfidence,
             reason: schedulerContradictsContactForm
@@ -2454,7 +2426,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: false,
-            needsManualReview: !highConfidence,
             clickedText,
             confidence: highConfidence ? 0.85 : (bestVendor.name ? 0.55 : 0.45),
             reason: highConfidence
@@ -2475,11 +2446,7 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             },
         };
 
-        if (result.needsManualReview) {
-            await maybeRetryOrPush({ request, pushData: pushResult, result });
-        } else {
-            await pushResult(result);
-        }
+        await pushResult(result);
         return;
     }
 
@@ -2536,7 +2503,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: true,
-            needsManualReview: false,
             clickedText,
             confidence: 0.82,
             reason:
@@ -2567,7 +2533,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
             bookingVendor: bestVendor.name,
             forcedAccountCreation: false,
             contactFormOnlyBooking: true,
-            needsManualReview: false,
             clickedText,
             confidence: 0.75,
             reason:
@@ -2601,7 +2566,6 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         bookingVendor: bestVendor.name,
         forcedAccountCreation: false,
         contactFormOnlyBooking: enhancedContactEvidence,
-        needsManualReview: !enhancedSchedulerEvidence && !enhancedContactEvidence,
         clickedText,
         confidence: enhancedSchedulerEvidence
             ? 0.72
@@ -2627,5 +2591,5 @@ router.addDefaultHandler(async ({ request, page, log, pushData }) => {
         },
     };
 
-    await maybeRetryOrPush({ request, pushData: pushResult, result });
+    await pushResult(result);
 });
